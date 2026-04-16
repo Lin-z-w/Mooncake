@@ -53,6 +53,11 @@ class MooncakeStoreService:
         self.config = None
         self._setup_logging()
 
+        # State for /api/reconfigure (Prefill/Decode mode switch)
+        self.current_mode = "prefill"          # "prefill" or "decode"
+        self.mounted_segment_ids = []          # persisted segment_ids from last decode mount
+        self.last_mount_info = {}              # last mount parameters for debugging
+
         try:
             if config_path:
                 self.config = MooncakeConfig.from_file(config_path)
@@ -143,6 +148,7 @@ class MooncakeStoreService:
     async def start_http_service(self, port: int = 8080):
         app = web.Application(client_max_size=1024 * 1024 * 100)  # 100MB limit
         app.add_routes([
+            web.post('/api/reconfigure', _timed_handler("RECONFIGURE", self.handle_reconfigure)),
             web.post('/api/mount', _timed_handler("MOUNT", self.handle_mount)),
             web.post('/api/unmount', _timed_handler("UNMOUNT", self.handle_unmount)),
             web.put('/api/put', _timed_handler("PUT", self.handle_put)),
@@ -159,6 +165,89 @@ class MooncakeStoreService:
         return True
 
     # REST API handlers
+    async def handle_reconfigure(self, request):
+        try:
+            data = await request.json()
+            mode = data.get("mode", "").lower()
+
+            if mode == "decode":
+                path = data.get("path")
+                size = data.get("size")
+                offset = data.get("offset", 0)
+                protocol = data.get("protocol", self.config.protocol)
+                location = data.get("location", "")
+
+                if not path or size is None:
+                    return web.Response(
+                        status=400,
+                        text=json.dumps({"error": "Missing path or size for decode mode"}),
+                        content_type="application/json"
+                    )
+
+                # If already in decode mode with mounted segments, unmount them first
+                if self.mounted_segment_ids:
+                    logging.info("Reconfigure decode: unmounting previous segments before remount")
+                    self.store.unmount_segment(self.mounted_segment_ids)
+                    self.mounted_segment_ids.clear()
+
+                result = self.store.mount_segment(path, offset, size, protocol, location)
+                if result["ret"] != 0:
+                    return web.Response(
+                        status=500,
+                        text=json.dumps({"error": f"Mount failed, ret={result['ret']}"}),
+                        content_type="application/json"
+                    )
+
+                self.mounted_segment_ids = list(result["segment_ids"])
+                self.current_mode = "decode"
+                self.last_mount_info = {
+                    "path": path, "offset": offset, "size": size,
+                    "protocol": protocol, "location": location
+                }
+
+                return web.Response(
+                    status=200,
+                    text=json.dumps({
+                        "status": "success",
+                        "mode": self.current_mode,
+                        "segment_ids": self.mounted_segment_ids,
+                    }),
+                    content_type="application/json"
+                )
+
+            elif mode == "prefill":
+                if self.mounted_segment_ids:
+                    ret = self.store.unmount_segment(self.mounted_segment_ids)
+                    if ret != 0:
+                        return web.Response(
+                            status=500,
+                            text=json.dumps({"error": f"Unmount failed, ret={ret}"}),
+                            content_type="application/json"
+                        )
+                    self.mounted_segment_ids.clear()
+
+                self.current_mode = "prefill"
+                self.last_mount_info.clear()
+                return web.Response(
+                    status=200,
+                    text=json.dumps({"status": "success", "mode": self.current_mode}),
+                    content_type="application/json"
+                )
+
+            else:
+                return web.Response(
+                    status=400,
+                    text=json.dumps({"error": "Invalid mode. Use 'decode' or 'prefill'"}),
+                    content_type="application/json"
+                )
+        except Exception as e:
+            logging.error("RECONFIGURE error: %s", e)
+            return web.Response(
+                status=500,
+                text=json.dumps({"error": str(e)}),
+                content_type="application/json"
+            )
+
     async def handle_mount(self, request):
         try:
             data = await request.json()
