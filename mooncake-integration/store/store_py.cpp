@@ -276,6 +276,39 @@ class MooncakeStorePyWrapper {
         return store_->health_check();
     }
 
+    py::dict mount_segment(const std::string &path, size_t offset, size_t size,
+                           const std::string &protocol,
+                           const std::string &location) {
+        py::dict result;
+        result["ret"] = -1;
+        result["segment_ids"] = py::list();
+
+        auto real_client = std::dynamic_pointer_cast<RealClient>(store_);
+        if (!real_client) {
+            LOG(ERROR) << "mount_segment requires RealClient";
+            return result;
+        }
+        std::vector<std::string> segment_ids;
+        int ret = real_client->mountSegment(path, offset, size, protocol,
+                                            location, segment_ids);
+        result["ret"] = ret;
+        py::list ids;
+        for (const auto &id : segment_ids) {
+            ids.append(id);
+        }
+        result["segment_ids"] = ids;
+        return result;
+    }
+
+    int unmount_segment(const std::vector<std::string> &segment_ids) {
+        auto real_client = std::dynamic_pointer_cast<RealClient>(store_);
+        if (!real_client) {
+            LOG(ERROR) << "unmount_segment requires RealClient";
+            return -1;
+        }
+        return real_client->unmountSegment(segment_ids);
+    }
+
     std::string get_tp_key_name(const std::string &base_key, int rank) {
         return base_key + "_tp_" + std::to_string(rank);
     }
@@ -1638,6 +1671,11 @@ PYBIND11_MODULE(store, m) {
                  return self.store_->initAll(protocol, device_name,
                                              mount_segment_size);
              })
+        .def("mount_segment", &MooncakeStorePyWrapper::mount_segment,
+             py::arg("path"), py::arg("offset") = 0, py::arg("size"),
+             py::arg("protocol") = "tcp", py::arg("location") = "")
+        .def("unmount_segment", &MooncakeStorePyWrapper::unmount_segment,
+             py::arg("segment_id"))
         .def("alloc_from_mem_pool",
              [](MooncakeStorePyWrapper &self, size_t size) {
                  py::gil_scoped_release release;

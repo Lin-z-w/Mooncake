@@ -667,6 +667,31 @@ class RealClient : public PyClient {
         const std::string &target_rpc_service_addr,
         std::unordered_map<std::string, Slice> &objects);
 
+    /**
+     * @brief Mount a shared memory file region and return segment ids.
+     *        If size > max_mr_size, it will be split into multiple chunks
+     *        and mounted separately. RealClient will open(path) + mmap
+     *        internally for each chunk.
+     */
+    int mountSegment(const std::string &path, size_t offset, size_t size,
+                     const std::string &protocol, const std::string &location,
+                     std::vector<std::string> &out_segment_ids);
+
+    /**
+     * @brief Unmount segments by their ids and clean up local mmap/fd.
+     */
+    int unmountSegment(const std::vector<std::string> &segment_ids);
+
+   private:
+    struct MountedSegmentRecord {
+        int fd = -1;
+        void *mmap_base = nullptr;
+        size_t size = 0;
+        std::string path;
+    };
+    std::unordered_map<std::string, MountedSegmentRecord>
+        mounted_segment_records_;
+
     std::unique_ptr<AutoPortBinder> port_binder_ = nullptr;
 
     struct SegmentDeleter {

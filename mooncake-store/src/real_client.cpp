@@ -2,6 +2,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <numa.h>
 #include <numaif.h>
 #include <pthread.h>
@@ -939,6 +941,117 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
 }
 
 int RealClient::tearDownAll() { return to_py_ret(tearDownAll_internal()); }
+
+int RealClient::mountSegment(const std::string &path, size_t offset,
+                             size_t size, const std::string &protocol,
+                             const std::string &location,
+                             std::vector<std::string> &out_segment_ids) {
+    if (!client_) {
+        LOG(ERROR) << "Client not initialized";
+        return -1;
+    }
+
+    size_t max_mr_size = globalConfig().max_mr_size;
+    size_t remaining = size;
+    size_t current_offset = offset;
+    std::vector<std::string> mounted_ids;
+    std::vector<MountedSegmentRecord> mounted_records;
+
+    while (remaining > 0) {
+        size_t chunk_size = std::min(remaining, max_mr_size);
+
+        int fd = open(path.c_str(), O_RDWR);
+        if (fd < 0) {
+            LOG(ERROR) << "open failed for " << path << ": " << strerror(errno);
+            break;
+        }
+
+        void *ptr = mmap(nullptr, chunk_size, PROT_READ | PROT_WRITE,
+                         MAP_SHARED, fd, current_offset);
+        if (ptr == MAP_FAILED) {
+            LOG(ERROR) << "mmap failed for " << path << ": " << strerror(errno);
+            close(fd);
+            break;
+        }
+
+        auto result =
+            client_->MountSegmentAndGetId(ptr, chunk_size, protocol, location);
+        if (!result.has_value()) {
+            LOG(ERROR) << "MountSegmentAndGetId failed";
+            munmap(ptr, chunk_size);
+            close(fd);
+            break;
+        }
+
+        std::string segment_id = UuidToString(result.value());
+        mounted_ids.push_back(segment_id);
+        mounted_records.push_back({fd, ptr, chunk_size, path});
+
+        remaining -= chunk_size;
+        current_offset += chunk_size;
+    }
+
+    // If not all chunks were mounted, roll back successfully mounted ones
+    if (remaining > 0) {
+        for (size_t i = 0; i < mounted_ids.size(); ++i) {
+            UUID id;
+            if (StringToUuid(mounted_ids[i], id)) {
+                client_->UnmountSegmentById(id);
+            }
+            if (mounted_records[i].mmap_base) {
+                munmap(mounted_records[i].mmap_base, mounted_records[i].size);
+            }
+            if (mounted_records[i].fd >= 0) {
+                close(mounted_records[i].fd);
+            }
+        }
+        out_segment_ids.clear();
+        return -1;
+    }
+
+    for (size_t i = 0; i < mounted_ids.size(); ++i) {
+        mounted_segment_records_[mounted_ids[i]] = mounted_records[i];
+    }
+    out_segment_ids = std::move(mounted_ids);
+    return 0;
+}
+
+int RealClient::unmountSegment(const std::vector<std::string> &segment_ids) {
+    if (!client_) {
+        LOG(ERROR) << "Client not initialized";
+        return -1;
+    }
+
+    int first_error = 0;
+    for (const auto &segment_id : segment_ids) {
+        UUID id;
+        if (!StringToUuid(segment_id, id)) {
+            LOG(ERROR) << "Invalid segment_id: " << segment_id;
+            if (first_error == 0) first_error = -1;
+            continue;
+        }
+
+        auto result = client_->UnmountSegmentById(id);
+        if (!result.has_value()) {
+            LOG(ERROR) << "UnmountSegmentById failed for " << segment_id;
+            if (first_error == 0) {
+                first_error = static_cast<int>(result.error());
+            }
+        }
+
+        auto it = mounted_segment_records_.find(segment_id);
+        if (it != mounted_segment_records_.end()) {
+            if (it->second.mmap_base) {
+                munmap(it->second.mmap_base, it->second.size);
+            }
+            if (it->second.fd >= 0) {
+                close(it->second.fd);
+            }
+            mounted_segment_records_.erase(it);
+        }
+    }
+    return first_error;
+}
 
 int RealClient::health_check() {
     if (closed_.load()) return HC_NOT_INITIALIZED;

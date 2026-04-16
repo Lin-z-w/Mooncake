@@ -2184,6 +2184,101 @@ tl::expected<void, ErrorCode> Client::UnmountSegment(const void* buffer,
     return {};
 }
 
+tl::expected<UUID, ErrorCode> Client::MountSegmentAndGetId(
+    const void* buffer, size_t size, const std::string& protocol,
+    const std::string& location) {
+    auto check_result = CheckRegisterMemoryParams(buffer, size);
+    if (!check_result) {
+        return tl::unexpected(check_result.error());
+    }
+
+    UUID segment_id;
+    {
+        std::lock_guard<std::mutex> lock(mounted_segments_mutex_);
+
+        // Check if the segment overlaps with any existing segment
+        for (auto& it : mounted_segments_) {
+            auto& mtseg = it.second;
+            uintptr_t l1 = reinterpret_cast<uintptr_t>(mtseg.base);
+            uintptr_t r1 = reinterpret_cast<uintptr_t>(mtseg.size) + l1;
+            uintptr_t l2 = reinterpret_cast<uintptr_t>(buffer);
+            uintptr_t r2 = reinterpret_cast<uintptr_t>(size) + l2;
+            if (std::max(l1, l2) < std::min(r1, r2)) {
+                LOG(ERROR) << "segment_overlaps base1=" << mtseg.base
+                           << " size1=" << mtseg.size << " base2=" << buffer
+                           << " size2=" << size;
+                return tl::unexpected(ErrorCode::INVALID_PARAMS);
+            }
+        }
+
+        int rc = transfer_engine_->registerLocalMemory((void*)buffer, size,
+                                                       location, true, true);
+        if (rc != 0) {
+            LOG(ERROR) << "register_local_memory_failed base=" << buffer
+                       << " size=" << size << ", error=" << rc;
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        }
+
+        Segment segment;
+        segment.id = generate_uuid();
+        segment.name = local_hostname_;
+        segment.base = reinterpret_cast<uintptr_t>(buffer);
+        segment.size = size;
+        segment.protocol = protocol;
+        if (metadata_connstring_ == P2PHANDSHAKE) {
+            segment.te_endpoint = transfer_engine_->getLocalIpAndPort();
+        } else {
+            segment.te_endpoint = local_hostname_;
+        }
+
+        auto mount_result = master_client_.MountSegment(segment);
+        if (!mount_result) {
+            ErrorCode err = mount_result.error();
+            LOG(ERROR) << "mount_segment_to_master_failed base=" << buffer
+                       << " size=" << size << ", error=" << err;
+            return tl::unexpected(err);
+        }
+
+        segment_id = segment.id;
+        mounted_segments_[segment_id] = segment;
+    }
+
+    EnsureStorageControlPlaneStarted();
+    return segment_id;
+}
+
+tl::expected<void, ErrorCode> Client::UnmountSegmentById(
+    const UUID& segment_id) {
+    std::lock_guard<std::mutex> lock(mounted_segments_mutex_);
+    auto segment = mounted_segments_.find(segment_id);
+    if (segment == mounted_segments_.end()) {
+        LOG(ERROR) << "segment_not_found id=" << UuidToString(segment_id);
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    auto unmount_result = master_client_.UnmountSegment(segment->second.id);
+    if (!unmount_result) {
+        ErrorCode err = unmount_result.error();
+        LOG(ERROR) << "Failed to unmount segment from master: "
+                   << toString(err);
+        return tl::unexpected(err);
+    }
+
+    int rc = transfer_engine_->unregisterLocalMemory(
+        reinterpret_cast<void*>(segment->second.base));
+    if (rc != 0) {
+        LOG(ERROR) << "Failed to unregister transfer buffer with transfer "
+                      "engine ret is "
+                   << rc;
+        if (rc != ERR_ADDRESS_NOT_REGISTERED) {
+            return tl::unexpected(ErrorCode::INTERNAL_ERROR);
+        }
+    }
+
+    mounted_segments_.erase(segment);
+    return {};
+}
+
 tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
     void* addr, size_t length, const std::string& location,
     bool remote_accessible, bool update_metadata) {
