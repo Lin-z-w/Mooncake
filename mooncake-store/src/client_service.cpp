@@ -2078,66 +2078,37 @@ std::vector<int> Client::GetNicNumaNodes() const {
 tl::expected<void, ErrorCode> Client::MountSegment(
     const void* buffer, size_t size, const std::string& protocol,
     const std::string& location) {
-    auto check_result = CheckRegisterMemoryParams(buffer, size);
-    if (!check_result) {
-        return tl::unexpected(check_result.error());
+    auto result = MountSegmentAndGetId(buffer, size, protocol, location);
+    if (!result) {
+        return tl::unexpected(result.error());
+    }
+    return {};
+}
+
+tl::expected<void, ErrorCode> Client::UnmountSegmentImpl(
+    std::unordered_map<UUID, Segment, boost::hash<UUID>>::iterator it) {
+    auto unmount_result = master_client_.UnmountSegment(it->second.id);
+    if (!unmount_result) {
+        ErrorCode err = unmount_result.error();
+        LOG(ERROR) << "Failed to unmount segment from master: "
+                   << toString(err);
+        return tl::unexpected(err);
     }
 
-    {
-        std::lock_guard<std::mutex> lock(mounted_segments_mutex_);
-
-        // Check if the segment overlaps with any existing segment
-        for (auto& it : mounted_segments_) {
-            auto& mtseg = it.second;
-            uintptr_t l1 = reinterpret_cast<uintptr_t>(mtseg.base);
-            uintptr_t r1 = reinterpret_cast<uintptr_t>(mtseg.size) + l1;
-            uintptr_t l2 = reinterpret_cast<uintptr_t>(buffer);
-            uintptr_t r2 = reinterpret_cast<uintptr_t>(size) + l2;
-            if (std::max(l1, l2) < std::min(r1, r2)) {
-                LOG(ERROR) << "segment_overlaps base1=" << mtseg.base
-                           << " size1=" << mtseg.size << " base2=" << buffer
-                           << " size2=" << size;
-                return tl::unexpected(ErrorCode::INVALID_PARAMS);
-            }
+    int rc = transfer_engine_->unregisterLocalMemory(
+        reinterpret_cast<void*>(it->second.base));
+    if (rc != 0) {
+        LOG(ERROR) << "Failed to unregister transfer buffer with transfer "
+                      "engine ret is "
+                   << rc;
+        if (rc != ERR_ADDRESS_NOT_REGISTERED) {
+            return tl::unexpected(ErrorCode::INTERNAL_ERROR);
         }
-
-        int rc = transfer_engine_->registerLocalMemory((void*)buffer, size,
-                                                       location, true, true);
-        if (rc != 0) {
-            LOG(ERROR) << "register_local_memory_failed base=" << buffer
-                       << " size=" << size << ", error=" << rc;
-            return tl::unexpected(ErrorCode::INVALID_PARAMS);
-        }
-
-        // Build segment with logical name; attach TE endpoint for transport
-        Segment segment;
-        segment.id = generate_uuid();
-        segment.name = local_hostname_;
-        segment.base = reinterpret_cast<uintptr_t>(buffer);
-        segment.size = size;
-        segment.protocol = protocol;
-        // For P2P handshake mode, publish the actual transport endpoint that
-        // was negotiated by the transfer engine. Otherwise, keep the logical
-        // hostname so metadata backends (HTTP/etcd/redis) can resolve the
-        // segment by name.
-        if (metadata_connstring_ == P2PHANDSHAKE) {
-            segment.te_endpoint = transfer_engine_->getLocalIpAndPort();
-        } else {
-            segment.te_endpoint = local_hostname_;
-        }
-
-        auto mount_result = master_client_.MountSegment(segment);
-        if (!mount_result) {
-            ErrorCode err = mount_result.error();
-            LOG(ERROR) << "mount_segment_to_master_failed base=" << buffer
-                       << " size=" << size << ", error=" << err;
-            return tl::unexpected(err);
-        }
-
-        mounted_segments_[segment.id] = segment;
+        // Otherwise, the segment is already unregistered from transfer
+        // engine, we can continue
     }
 
-    EnsureStorageControlPlaneStarted();
+    mounted_segments_.erase(it);
     return {};
 }
 
@@ -2159,29 +2130,7 @@ tl::expected<void, ErrorCode> Client::UnmountSegment(const void* buffer,
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    auto unmount_result = master_client_.UnmountSegment(segment->second.id);
-    if (!unmount_result) {
-        ErrorCode err = unmount_result.error();
-        LOG(ERROR) << "Failed to unmount segment from master: "
-                   << toString(err);
-        return tl::unexpected(err);
-    }
-
-    int rc = transfer_engine_->unregisterLocalMemory(
-        reinterpret_cast<void*>(segment->second.base));
-    if (rc != 0) {
-        LOG(ERROR) << "Failed to unregister transfer buffer with transfer "
-                      "engine ret is "
-                   << rc;
-        if (rc != ERR_ADDRESS_NOT_REGISTERED) {
-            return tl::unexpected(ErrorCode::INTERNAL_ERROR);
-        }
-        // Otherwise, the segment is already unregistered from transfer
-        // engine, we can continue
-    }
-
-    mounted_segments_.erase(segment);
-    return {};
+    return UnmountSegmentImpl(segment);
 }
 
 tl::expected<UUID, ErrorCode> Client::MountSegmentAndGetId(
@@ -2256,27 +2205,7 @@ tl::expected<void, ErrorCode> Client::UnmountSegmentById(
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    auto unmount_result = master_client_.UnmountSegment(segment->second.id);
-    if (!unmount_result) {
-        ErrorCode err = unmount_result.error();
-        LOG(ERROR) << "Failed to unmount segment from master: "
-                   << toString(err);
-        return tl::unexpected(err);
-    }
-
-    int rc = transfer_engine_->unregisterLocalMemory(
-        reinterpret_cast<void*>(segment->second.base));
-    if (rc != 0) {
-        LOG(ERROR) << "Failed to unregister transfer buffer with transfer "
-                      "engine ret is "
-                   << rc;
-        if (rc != ERR_ADDRESS_NOT_REGISTERED) {
-            return tl::unexpected(ErrorCode::INTERNAL_ERROR);
-        }
-    }
-
-    mounted_segments_.erase(segment);
-    return {};
+    return UnmountSegmentImpl(segment);
 }
 
 tl::expected<void, ErrorCode> Client::RegisterLocalMemory(

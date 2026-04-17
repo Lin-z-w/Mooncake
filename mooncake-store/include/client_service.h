@@ -670,6 +670,13 @@ class Client {
     std::mutex mounted_segments_mutex_;
     std::unordered_map<UUID, Segment, boost::hash<UUID>> mounted_segments_;
 
+    /**
+     * @brief Internal helper to unmount a segment by iterator.
+     *        Caller must hold mounted_segments_mutex_.
+     */
+    tl::expected<void, ErrorCode> UnmountSegmentImpl(
+        std::unordered_map<UUID, Segment, boost::hash<UUID>>::iterator it);
+
     // Configuration
     const std::string local_hostname_;
     const std::string metadata_connstring_;
