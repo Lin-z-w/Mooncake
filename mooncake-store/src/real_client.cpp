@@ -1009,8 +1009,11 @@ int RealClient::mountSegment(const std::string &path, size_t offset,
         return -1;
     }
 
-    for (size_t i = 0; i < mounted_ids.size(); ++i) {
-        mounted_segment_records_[mounted_ids[i]] = mounted_records[i];
+    {
+        std::lock_guard<std::mutex> lock(mounted_segment_records_mutex_);
+        for (size_t i = 0; i < mounted_ids.size(); ++i) {
+            mounted_segment_records_[mounted_ids[i]] = mounted_records[i];
+        }
     }
     out_segment_ids = std::move(mounted_ids);
     return 0;
@@ -1023,31 +1026,34 @@ int RealClient::unmountSegment(const std::vector<std::string> &segment_ids) {
     }
 
     int first_error = 0;
-    for (const auto &segment_id : segment_ids) {
-        UUID id;
-        if (!StringToUuid(segment_id, id)) {
-            LOG(ERROR) << "Invalid segment_id: " << segment_id;
-            if (first_error == 0) first_error = -1;
-            continue;
-        }
+    {
+        std::lock_guard<std::mutex> lock(mounted_segment_records_mutex_);
+        for (const auto &segment_id : segment_ids) {
+            UUID id;
+            if (!StringToUuid(segment_id, id)) {
+                LOG(ERROR) << "Invalid segment_id: " << segment_id;
+                if (first_error == 0) first_error = -1;
+                continue;
+            }
 
-        auto result = client_->UnmountSegmentById(id);
-        if (!result.has_value()) {
-            LOG(ERROR) << "UnmountSegmentById failed for " << segment_id;
-            if (first_error == 0) {
-                first_error = static_cast<int>(result.error());
+            auto result = client_->UnmountSegmentById(id);
+            if (!result.has_value()) {
+                LOG(ERROR) << "UnmountSegmentById failed for " << segment_id;
+                if (first_error == 0) {
+                    first_error = static_cast<int>(result.error());
+                }
             }
-        }
 
-        auto it = mounted_segment_records_.find(segment_id);
-        if (it != mounted_segment_records_.end()) {
-            if (it->second.mmap_base) {
-                munmap(it->second.mmap_base, it->second.size);
+            auto it = mounted_segment_records_.find(segment_id);
+            if (it != mounted_segment_records_.end()) {
+                if (it->second.mmap_base) {
+                    munmap(it->second.mmap_base, it->second.size);
+                }
+                if (it->second.fd >= 0) {
+                    close(it->second.fd);
+                }
+                mounted_segment_records_.erase(it);
             }
-            if (it->second.fd >= 0) {
-                close(it->second.fd);
-            }
-            mounted_segment_records_.erase(it);
         }
     }
     return first_error;

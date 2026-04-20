@@ -691,6 +691,7 @@ class RealClient : public PyClient {
     };
     std::unordered_map<std::string, MountedSegmentRecord>
         mounted_segment_records_;
+    std::mutex mounted_segment_records_mutex_;
 
     std::unique_ptr<AutoPortBinder> port_binder_ = nullptr;
 
