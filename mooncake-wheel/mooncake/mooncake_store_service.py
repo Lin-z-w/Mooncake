@@ -187,7 +187,13 @@ class MooncakeStoreService:
                 # If already in decode mode with mounted segments, unmount them first
                 if self.mounted_segment_ids:
                     logging.info("Reconfigure decode: unmounting previous segments before remount")
-                    self.store.unmount_segment(self.mounted_segment_ids)
+                    ret = self.store.unmount_segment(self.mounted_segment_ids)
+                    if ret != 0:
+                        return web.Response(
+                            status=500,
+                            text=json.dumps({"error": f"Unmount of previous segments failed, ret={ret}"}),
+                            content_type="application/json"
+                        )
                     self.mounted_segment_ids.clear()
 
                 result = self.store.mount_segment(path, offset, size, protocol, location)

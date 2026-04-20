@@ -682,16 +682,11 @@ class RealClient : public PyClient {
      */
     int unmountSegment(const std::vector<std::string> &segment_ids);
 
-   private:
     struct MountedSegmentRecord {
-        int fd = -1;
         void *mmap_base = nullptr;
         size_t size = 0;
         std::string path;
     };
-    std::unordered_map<std::string, MountedSegmentRecord>
-        mounted_segment_records_;
-    std::mutex mounted_segment_records_mutex_;
 
     std::unique_ptr<AutoPortBinder> port_binder_ = nullptr;
 
@@ -829,6 +824,11 @@ class RealClient : public PyClient {
     void teardown_ascend_shm_buffer(MappedShm &shm);
     tl::expected<void, ErrorCode> setup_ascend_internal(
         size_t local_buffer_size);
+
+   private:
+    std::unordered_map<std::string, MountedSegmentRecord>
+        mounted_segment_records_;
+    std::mutex mounted_segment_records_mutex_;
 };
 
 }  // namespace mooncake

@@ -957,20 +957,19 @@ int RealClient::mountSegment(const std::string &path, size_t offset,
     std::vector<std::string> mounted_ids;
     std::vector<MountedSegmentRecord> mounted_records;
 
+    int fd = open(path.c_str(), O_RDWR);
+    if (fd < 0) {
+        LOG(ERROR) << "open failed for " << path << ": " << strerror(errno);
+        return -1;
+    }
+
     while (remaining > 0) {
         size_t chunk_size = std::min(remaining, max_mr_size);
-
-        int fd = open(path.c_str(), O_RDWR);
-        if (fd < 0) {
-            LOG(ERROR) << "open failed for " << path << ": " << strerror(errno);
-            break;
-        }
 
         void *ptr = mmap(nullptr, chunk_size, PROT_READ | PROT_WRITE,
                          MAP_SHARED, fd, current_offset);
         if (ptr == MAP_FAILED) {
             LOG(ERROR) << "mmap failed for " << path << ": " << strerror(errno);
-            close(fd);
             break;
         }
 
@@ -979,17 +978,18 @@ int RealClient::mountSegment(const std::string &path, size_t offset,
         if (!result.has_value()) {
             LOG(ERROR) << "MountSegmentAndGetId failed";
             munmap(ptr, chunk_size);
-            close(fd);
             break;
         }
 
         std::string segment_id = UuidToString(result.value());
         mounted_ids.push_back(segment_id);
-        mounted_records.push_back({fd, ptr, chunk_size, path});
+        mounted_records.push_back({ptr, chunk_size, path});
 
         remaining -= chunk_size;
         current_offset += chunk_size;
     }
+
+    close(fd);
 
     // If not all chunks were mounted, roll back successfully mounted ones
     if (remaining > 0) {
@@ -1000,9 +1000,6 @@ int RealClient::mountSegment(const std::string &path, size_t offset,
             }
             if (mounted_records[i].mmap_base) {
                 munmap(mounted_records[i].mmap_base, mounted_records[i].size);
-            }
-            if (mounted_records[i].fd >= 0) {
-                close(mounted_records[i].fd);
             }
         }
         out_segment_ids.clear();
@@ -1048,9 +1045,6 @@ int RealClient::unmountSegment(const std::vector<std::string> &segment_ids) {
             if (it != mounted_segment_records_.end()) {
                 if (it->second.mmap_base) {
                     munmap(it->second.mmap_base, it->second.size);
-                }
-                if (it->second.fd >= 0) {
-                    close(it->second.fd);
                 }
                 mounted_segment_records_.erase(it);
             }
