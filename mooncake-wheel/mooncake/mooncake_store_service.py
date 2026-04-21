@@ -309,7 +309,8 @@ class MooncakeStoreService:
                     content_type="application/json",
                 )
 
-            ret = self.store.unmount_segment(segment_ids)
+            grace_period_seconds = data.get("grace_period_seconds", 0)
+            ret = self.store.unmount_segment(segment_ids, grace_period_seconds)
             if ret != 0:
                 return web.Response(
                     status=500,

@@ -305,8 +305,10 @@ class Client {
     /**
      * @brief Unmounts a segment by its UUID.
      *        Logic is identical to UnmountSegment, but looks up by id.
+     * @param grace_period_ms 0 = immediate unmount (legacy behavior).
      */
-    tl::expected<void, ErrorCode> UnmountSegmentById(const UUID& segment_id);
+    tl::expected<void, ErrorCode> UnmountSegmentById(
+        const UUID& segment_id, uint64_t grace_period_ms = 0);
 
     /**
      * @brief Registers memory buffer with TransferEngine for data transfer
@@ -670,12 +672,21 @@ class Client {
     std::mutex mounted_segments_mutex_;
     std::unordered_map<UUID, Segment, boost::hash<UUID>> mounted_segments_;
 
+    // Segments in graceful unmount: readable by remote peers, not allocatable
+    // locally. TE MR remains registered until master confirms removal.
+    std::unordered_map<UUID, Segment, boost::hash<UUID>>
+        gracefully_unmounting_segments_;
+
     /**
      * @brief Internal helper to unmount a segment by iterator.
      *        Caller must hold mounted_segments_mutex_.
      */
     tl::expected<void, ErrorCode> UnmountSegmentImpl(
         std::unordered_map<UUID, Segment, boost::hash<UUID>>::iterator it);
+
+    void StartGracefulUnmountTimer(const UUID& segment_id,
+                                   uint64_t grace_period_ms);
+    void OnGracefulUnmountTimer(const UUID& segment_id, int retry_left);
 
     // Configuration
     const std::string local_hostname_;

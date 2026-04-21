@@ -1016,12 +1016,14 @@ int RealClient::mountSegment(const std::string &path, size_t offset,
     return 0;
 }
 
-int RealClient::unmountSegment(const std::vector<std::string> &segment_ids) {
+int RealClient::unmountSegment(const std::vector<std::string> &segment_ids,
+                               uint64_t grace_period_seconds) {
     if (!client_) {
         LOG(ERROR) << "Client not initialized";
         return -1;
     }
 
+    uint64_t grace_period_ms = grace_period_seconds * 1000;
     int first_error = 0;
     {
         std::lock_guard<std::mutex> lock(mounted_segment_records_mutex_);
@@ -1033,7 +1035,7 @@ int RealClient::unmountSegment(const std::vector<std::string> &segment_ids) {
                 continue;
             }
 
-            auto result = client_->UnmountSegmentById(id);
+            auto result = client_->UnmountSegmentById(id, grace_period_ms);
             if (!result.has_value()) {
                 LOG(ERROR) << "UnmountSegmentById failed for " << segment_id;
                 if (first_error == 0) {
@@ -1041,12 +1043,17 @@ int RealClient::unmountSegment(const std::vector<std::string> &segment_ids) {
                 }
             }
 
-            auto it = mounted_segment_records_.find(segment_id);
-            if (it != mounted_segment_records_.end()) {
-                if (it->second.mmap_base) {
-                    munmap(it->second.mmap_base, it->second.size);
+            // For immediate unmount, clean up local mmap/fd right away.
+            // For graceful unmount, local mmap/fd is kept until the segment
+            // is actually removed or the client destructor runs.
+            if (grace_period_ms == 0) {
+                auto it = mounted_segment_records_.find(segment_id);
+                if (it != mounted_segment_records_.end()) {
+                    if (it->second.mmap_base) {
+                        munmap(it->second.mmap_base, it->second.size);
+                    }
+                    mounted_segment_records_.erase(it);
                 }
-                mounted_segment_records_.erase(it);
             }
         }
     }

@@ -17,11 +17,12 @@ namespace mooncake {
  * @brief Status of a mounted segment in master
  */
 enum class SegmentStatus {
-    UNDEFINED = 0,  // Uninitialized
-    OK,             // Segment is mounted and available for allocation
-    DRAINING,       // Segment remains readable but accepts no new allocations
-    DRAINED,        // Segment has been drained and awaits unmount
-    UNMOUNTING,     // Segment is under unmounting
+    UNDEFINED = 0,            // Uninitialized
+    OK,                       // Segment is mounted and available for allocation
+    DRAINING,                 // Segment remains readable but accepts no new allocations
+    DRAINED,                  // Segment has been drained and awaits unmount
+    GRACEFULLY_UNMOUNTING,    // NEW: readable, no new allocations, timer running
+    UNMOUNTING,               // Segment is under unmounting
 };
 
 /**
@@ -34,6 +35,7 @@ inline std::ostream& operator<<(std::ostream& os,
                        {SegmentStatus::OK, "OK"},
                        {SegmentStatus::DRAINING, "DRAINING"},
                        {SegmentStatus::DRAINED, "DRAINED"},
+                       {SegmentStatus::GRACEFULLY_UNMOUNTING, "GRACEFULLY_UNMOUNTING"},
                        {SegmentStatus::UNMOUNTING, "UNMOUNTING"}};
 
     os << (status_strings.count(status) ? status_strings.at(status)
@@ -100,6 +102,12 @@ class ScopedSegmentAccess {
      */
     ErrorCode PrepareUnmountSegment(const UUID& segment_id,
                                     size_t& metrics_dec_capacity);
+
+    /**
+     * @brief Prepare a segment for graceful unmount: remove allocator but keep
+     *        segment metadata. Status becomes GRACEFULLY_UNMOUNTING.
+     */
+    ErrorCode PrepareGracefulUnmountSegment(const UUID& segment_id);
 
     /**
      * @brief Deleting the segment to complete the unmounting operation

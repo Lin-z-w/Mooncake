@@ -300,13 +300,14 @@ class MooncakeStorePyWrapper {
         return result;
     }
 
-    int unmount_segment(const std::vector<std::string> &segment_ids) {
+    int unmount_segment(const std::vector<std::string> &segment_ids,
+                        uint64_t grace_period_seconds = 0) {
         auto real_client = std::dynamic_pointer_cast<RealClient>(store_);
         if (!real_client) {
             LOG(ERROR) << "unmount_segment requires RealClient";
             return -1;
         }
-        return real_client->unmountSegment(segment_ids);
+        return real_client->unmountSegment(segment_ids, grace_period_seconds);
     }
 
     std::string get_tp_key_name(const std::string &base_key, int rank) {
@@ -1675,7 +1676,7 @@ PYBIND11_MODULE(store, m) {
              py::arg("path"), py::arg("offset") = 0, py::arg("size"),
              py::arg("protocol") = "tcp", py::arg("location") = "")
         .def("unmount_segment", &MooncakeStorePyWrapper::unmount_segment,
-             py::arg("segment_id"))
+             py::arg("segment_id"), py::arg("grace_period_seconds") = 0)
         .def("alloc_from_mem_pool",
              [](MooncakeStorePyWrapper &self, size_t size) {
                  py::gil_scoped_release release;

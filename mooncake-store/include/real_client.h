@@ -679,8 +679,10 @@ class RealClient : public PyClient {
 
     /**
      * @brief Unmount segments by their ids and clean up local mmap/fd.
+     * @param grace_period_seconds 0 = immediate unmount (legacy behavior).
      */
-    int unmountSegment(const std::vector<std::string> &segment_ids);
+    int unmountSegment(const std::vector<std::string> &segment_ids,
+                       uint64_t grace_period_seconds = 0);
 
     struct MountedSegmentRecord {
         void *mmap_base = nullptr;
