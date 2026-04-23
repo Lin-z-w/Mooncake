@@ -57,6 +57,7 @@ class MooncakeStoreService:
         self.current_mode = "prefill"          # "prefill" or "decode"
         self.mounted_segment_ids = []          # persisted segment_ids from last decode mount
         self.last_mount_info = {}              # last mount parameters for debugging
+        self._state_lock = asyncio.Lock()      # serialize reconfigure/mount/unmount state changes
 
         try:
             if config_path:
@@ -184,32 +185,33 @@ class MooncakeStoreService:
                         content_type="application/json"
                     )
 
-                # If already in decode mode with mounted segments, unmount them first
-                if self.mounted_segment_ids:
-                    logging.info("Reconfigure decode: unmounting previous segments before remount")
-                    ret = self.store.unmount_segment(self.mounted_segment_ids)
-                    if ret != 0:
+                async with self._state_lock:
+                    # If already in decode mode with mounted segments, unmount them first
+                    if self.mounted_segment_ids:
+                        logging.info("Reconfigure decode: unmounting previous segments before remount")
+                        ret = self.store.unmount_segment(self.mounted_segment_ids)
+                        if ret != 0:
+                            return web.Response(
+                                status=500,
+                                text=json.dumps({"error": f"Unmount of previous segments failed, ret={ret}"}),
+                                content_type="application/json"
+                            )
+                        self.mounted_segment_ids.clear()
+
+                    result = self.store.mount_segment(path, size, offset, protocol, location)
+                    if result["ret"] != 0:
                         return web.Response(
                             status=500,
-                            text=json.dumps({"error": f"Unmount of previous segments failed, ret={ret}"}),
+                            text=json.dumps({"error": f"Mount failed, ret={result['ret']}"}),
                             content_type="application/json"
                         )
-                    self.mounted_segment_ids.clear()
 
-                result = self.store.mount_segment(path, offset, size, protocol, location)
-                if result["ret"] != 0:
-                    return web.Response(
-                        status=500,
-                        text=json.dumps({"error": f"Mount failed, ret={result['ret']}"}),
-                        content_type="application/json"
-                    )
-
-                self.mounted_segment_ids = list(result["segment_ids"])
-                self.current_mode = "decode"
-                self.last_mount_info = {
-                    "path": path, "offset": offset, "size": size,
-                    "protocol": protocol, "location": location
-                }
+                    self.mounted_segment_ids = list(result["segment_ids"])
+                    self.current_mode = "decode"
+                    self.last_mount_info = {
+                        "path": path, "offset": offset, "size": size,
+                        "protocol": protocol, "location": location
+                    }
 
                 return web.Response(
                     status=200,
@@ -222,18 +224,20 @@ class MooncakeStoreService:
                 )
 
             elif mode == "prefill":
-                if self.mounted_segment_ids:
-                    ret = self.store.unmount_segment(self.mounted_segment_ids)
-                    if ret != 0:
-                        return web.Response(
-                            status=500,
-                            text=json.dumps({"error": f"Unmount failed, ret={ret}"}),
-                            content_type="application/json"
-                        )
-                    self.mounted_segment_ids.clear()
+                async with self._state_lock:
+                    if self.mounted_segment_ids:
+                        ret = self.store.unmount_segment(self.mounted_segment_ids)
+                        if ret != 0:
+                            return web.Response(
+                                status=500,
+                                text=json.dumps({"error": f"Unmount failed, ret={ret}"}),
+                                content_type="application/json"
+                            )
+                        self.mounted_segment_ids.clear()
 
-                self.current_mode = "prefill"
-                self.last_mount_info.clear()
+                    self.current_mode = "prefill"
+                    self.last_mount_info.clear()
+
                 return web.Response(
                     status=200,
                     text=json.dumps({"status": "success", "mode": self.current_mode}),
@@ -270,7 +274,7 @@ class MooncakeStoreService:
                     content_type="application/json"
                 )
 
-            result = self.store.mount_segment(path, offset, size, protocol, location)
+            result = self.store.mount_segment(path, size, offset, protocol, location)
             if result["ret"] != 0:
                 return web.Response(
                     status=500,
@@ -318,6 +322,13 @@ class MooncakeStoreService:
                     ),
                     content_type="application/json",
                 )
+
+            async with self._state_lock:
+                for sid in segment_ids:
+                    if sid in self.mounted_segment_ids:
+                        self.mounted_segment_ids.remove(sid)
+                if not self.mounted_segment_ids:
+                    self.current_mode = "prefill"
 
             return web.Response(
                 status=200,
