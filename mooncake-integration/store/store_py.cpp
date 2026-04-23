@@ -276,7 +276,7 @@ class MooncakeStorePyWrapper {
         return store_->health_check();
     }
 
-    py::dict mount_segment(const std::string &path, size_t offset, size_t size,
+    py::dict mount_segment(const std::string &path, size_t size, size_t offset,
                            const std::string &protocol,
                            const std::string &location) {
         py::dict result;
@@ -289,8 +289,12 @@ class MooncakeStorePyWrapper {
             return result;
         }
         std::vector<std::string> segment_ids;
-        int ret = real_client->mountSegment(path, offset, size, protocol,
+        int ret;
+        {
+            py::gil_scoped_release release;
+            ret = real_client->mountSegment(path, offset, size, protocol,
                                             location, segment_ids);
+        }
         result["ret"] = ret;
         py::list ids;
         for (const auto &id : segment_ids) {
@@ -306,6 +310,7 @@ class MooncakeStorePyWrapper {
             LOG(ERROR) << "unmount_segment requires RealClient";
             return -1;
         }
+        py::gil_scoped_release release;
         return real_client->unmountSegment(segment_ids);
     }
 
@@ -1672,10 +1677,10 @@ PYBIND11_MODULE(store, m) {
                                              mount_segment_size);
              })
         .def("mount_segment", &MooncakeStorePyWrapper::mount_segment,
-             py::arg("path"), py::arg("offset") = 0, py::arg("size"),
+             py::arg("path"), py::arg("size"), py::arg("offset") = 0,
              py::arg("protocol") = "tcp", py::arg("location") = "")
         .def("unmount_segment", &MooncakeStorePyWrapper::unmount_segment,
-             py::arg("segment_id"))
+             py::arg("segment_ids"))
         .def("alloc_from_mem_pool",
              [](MooncakeStorePyWrapper &self, size_t size) {
                  py::gil_scoped_release release;
