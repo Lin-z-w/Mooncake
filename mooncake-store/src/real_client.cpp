@@ -977,10 +977,9 @@ int RealClient::mountSegment(const std::string &path, size_t offset,
         return -1;
     }
 
-    if (offset > (size_t)st.st_size ||
-        size > (size_t)st.st_size - offset) {
-        LOG(ERROR) << "requested range [offset=" << offset << ", size="
-                   << size << "] exceeds file size " << st.st_size;
+    if (offset > (size_t)st.st_size || size > (size_t)st.st_size - offset) {
+        LOG(ERROR) << "requested range [offset=" << offset << ", size=" << size
+                   << "] exceeds file size " << st.st_size;
         close(fd);
         return -1;
     }
