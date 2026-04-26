@@ -152,6 +152,8 @@ class MooncakeStoreService:
             web.post('/api/reconfigure', _timed_handler("RECONFIGURE", self.handle_reconfigure)),
             web.post('/api/mount', _timed_handler("MOUNT", self.handle_mount)),
             web.post('/api/unmount', _timed_handler("UNMOUNT", self.handle_unmount)),
+            web.post('/api/allocate_mount', _timed_handler("ALLOCATE_MOUNT", self.handle_allocate_mount)),
+            web.post('/api/unmount_free', _timed_handler("UNMOUNT_FREE", self.handle_unmount_free)),
             web.put('/api/put', _timed_handler("PUT", self.handle_put)),
             web.get('/api/get/{key}', _timed_handler("GET", self.handle_get)),
             web.get('/api/exist/{key}', _timed_handler("EXIST", self.handle_exist)),
@@ -337,6 +339,83 @@ class MooncakeStoreService:
             )
         except Exception as e:
             logging.error("UNMOUNT error: %s", e)
+            return web.Response(
+                status=500,
+                text=json.dumps({"error": str(e)}),
+                content_type="application/json"
+            )
+
+    async def handle_allocate_mount(self, request):
+        try:
+            data = await request.json()
+            size = data.get("size")
+            protocol = data.get("protocol", self.config.protocol)
+            location = data.get("location", "")
+
+            if type(size) is not int or size <= 0:
+                return web.Response(
+                    status=400,
+                    text=json.dumps({"error": "Invalid size, must be a positive integer"}),
+                    content_type="application/json"
+                )
+
+            result = self.store.allocate_and_mount_segment(size, protocol, location)
+            if result["ret"] != 0:
+                return web.Response(
+                    status=500,
+                    text=json.dumps({"error": f"Allocate and mount failed, ret={result['ret']}"}),
+                    content_type="application/json"
+                )
+
+            return web.Response(
+                status=200,
+                text=json.dumps(
+                    {
+                        "status": "success",
+                        "segment_ids": list(result["segment_ids"]),
+                        "allocated_size": result["allocated_size"],
+                    }
+                ),
+                content_type="application/json",
+            )
+        except Exception as e:
+            logging.error("ALLOCATE_MOUNT error: %s", e)
+            return web.Response(
+                status=500,
+                text=json.dumps({"error": str(e)}),
+                content_type="application/json"
+            )
+
+    async def handle_unmount_free(self, request):
+        try:
+            data = await request.json()
+            segment_ids = data.get("segment_ids", [])
+            if isinstance(segment_ids, str):
+                segment_ids = [segment_ids]
+            if not segment_ids:
+                return web.Response(
+                    status=400,
+                    text=json.dumps({"error": "Missing segment_ids"}),
+                    content_type="application/json",
+                )
+
+            ret = self.store.unmount_and_free_segment(segment_ids)
+            if ret != 0:
+                return web.Response(
+                    status=500,
+                    text=json.dumps(
+                        {"error": f"Unmount and free failed, ret={ret}"}
+                    ),
+                    content_type="application/json",
+                )
+
+            return web.Response(
+                status=200,
+                text=json.dumps({"status": "success"}),
+                content_type="application/json",
+            )
+        except Exception as e:
+            logging.error("UNMOUNT_FREE error: %s", e)
             return web.Response(
                 status=500,
                 text=json.dumps({"error": str(e)}),
