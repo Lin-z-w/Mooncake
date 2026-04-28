@@ -45,9 +45,13 @@ class FakeStore:
         self.mounted = {}
         self.mount_calls = []
         self.unmount_calls = []
+        self.fail_mount = False
+        self.unmount_failures = set()
 
     def mount_segment(self, path, size, offset, protocol, location):
         self.mount_calls.append((path, size, offset, protocol, location))
+        if self.fail_mount:
+            return {"ret": -1, "segment_ids": []}
         segment_id = "00000000-0000-0000-0000-000000000001"
         self.mounted[segment_id] = {
             "path": path,
@@ -60,6 +64,9 @@ class FakeStore:
 
     def unmount_segment(self, segment_ids):
         self.unmount_calls.append(list(segment_ids))
+        for segment_id in segment_ids:
+            if segment_id in self.unmount_failures:
+                return -1
         for segment_id in segment_ids:
             self.mounted.pop(segment_id, None)
         return 0
@@ -119,6 +126,53 @@ class StoreServiceApiTest(unittest.IsolatedAsyncioTestCase):
             [["00000000-0000-0000-0000-000000000001"]],
         )
         self.assertEqual(self.service.current_mode, "prefill")
+
+    async def test_unmount_shm_updates_state_for_partial_success(self):
+        succeeded_id = "00000000-0000-0000-0000-000000000001"
+        failed_id = "00000000-0000-0000-0000-000000000002"
+        self.service.current_mode = "decode"
+        self.service.mounted_segment_ids = [succeeded_id, failed_id]
+        self.fake_store.unmount_failures = {failed_id}
+
+        resp = await self.service.handle_unmount_shm(
+            FakeRequest({"segment_ids": [succeeded_id, failed_id]})
+        )
+
+        self.assertEqual(resp.status, 500)
+        body = json.loads(resp.text)
+        self.assertEqual(body["failed_segment_ids"], [failed_id])
+        self.assertEqual(
+            self.fake_store.unmount_calls,
+            [[succeeded_id], [failed_id]],
+        )
+        self.assertEqual(self.service.mounted_segment_ids, [failed_id])
+        self.assertEqual(self.service.current_mode, "decode")
+
+    async def test_reconfigure_decode_mount_failure_rolls_back_to_prefill(self):
+        old_id = "00000000-0000-0000-0000-000000000001"
+        self.service.current_mode = "decode"
+        self.service.mounted_segment_ids = [old_id]
+        self.service.last_mount_info = {
+            "path": "/dev/shm/old",
+            "offset": 0,
+            "size": 4096,
+            "protocol": "tcp",
+            "location": "",
+        }
+        self.fake_store.fail_mount = True
+
+        resp = await self.service.handle_reconfigure(
+            FakeRequest({"mode": "decode", "path": "/dev/shm/new", "size": 4096})
+        )
+
+        self.assertEqual(resp.status, 500)
+        body = json.loads(resp.text)
+        self.assertEqual(body["mode"], "prefill")
+        self.assertIn("rolled back to prefill", body["error"])
+        self.assertEqual(self.fake_store.unmount_calls, [[old_id]])
+        self.assertEqual(self.service.mounted_segment_ids, [])
+        self.assertEqual(self.service.current_mode, "prefill")
+        self.assertEqual(self.service.last_mount_info, {})
 
     async def test_mount_shm_requires_name_and_size(self):
         resp = await self.service.handle_mount_shm(

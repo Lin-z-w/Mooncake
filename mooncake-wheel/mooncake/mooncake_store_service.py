@@ -209,9 +209,20 @@ class MooncakeStoreService:
 
                     result = self.store.mount_segment(path, size, offset, protocol, location)
                     if result["ret"] != 0:
+                        self.current_mode = "prefill"
+                        self.mounted_segment_ids.clear()
+                        self.last_mount_info.clear()
                         return web.Response(
                             status=500,
-                            text=json.dumps({"error": f"Mount failed, ret={result['ret']}"}),
+                            text=json.dumps(
+                                {
+                                    "error": (
+                                        f"Mount failed, ret={result['ret']}; "
+                                        "rolled back to prefill"
+                                    ),
+                                    "mode": self.current_mode,
+                                }
+                            ),
                             content_type="application/json"
                         )
 
@@ -323,22 +334,29 @@ class MooncakeStoreService:
                     content_type="application/json",
                 )
 
-            ret = self.store.unmount_segment(segment_ids)
-            if ret != 0:
-                return web.Response(
-                    status=500,
-                    text=json.dumps(
-                        {"error": f"Unmount failed, ret={ret}"}
-                    ),
-                    content_type="application/json",
-                )
-
+            failed_segment_ids = []
             async with self._state_lock:
                 for sid in segment_ids:
+                    ret = self.store.unmount_segment([sid])
+                    if ret != 0:
+                        failed_segment_ids.append(sid)
+                        continue
                     if sid in self.mounted_segment_ids:
                         self.mounted_segment_ids.remove(sid)
                 if not self.mounted_segment_ids:
                     self.current_mode = "prefill"
+
+            if failed_segment_ids:
+                return web.Response(
+                    status=500,
+                    text=json.dumps(
+                        {
+                            "error": "Unmount failed for one or more segments",
+                            "failed_segment_ids": failed_segment_ids,
+                        }
+                    ),
+                    content_type="application/json",
+                )
 
             return web.Response(
                 status=200,
