@@ -92,6 +92,7 @@ if (USE_UB)
     target_link_libraries(ub_transport_test PUBLIC transfer_engine gtest gtest_main glog::glog pthread)
     target_include_directories(ub_transport_test PRIVATE ${urma_INCLUDE_DIR})
     add_test(NAME ub_transport_test COMMAND ub_transport_test)
+    set_tests_properties(ub_transport_test PROPERTIES TIMEOUT 120)
 endif()
 
 add_executable(transfer_metadata_test ${WORKSPACE}/transfer_metadata_test.cpp)

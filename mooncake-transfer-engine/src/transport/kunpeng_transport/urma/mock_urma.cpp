@@ -1,4 +1,7 @@
 #include "urma_api.h"
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include <map>
 #include <vector>
 #include <cstring>
@@ -46,6 +49,12 @@ urma_status_t urma_init(urma_init_attr_t *init_attr) {
 urma_status_t urma_uninit(void) {
     std::lock_guard<std::mutex> lock(mock_mutex);
     initialized = false;
+    for (auto &entry : context_map) {
+        if (entry.first && entry.first->async_fd >= 0) {
+            close(entry.first->async_fd);
+        }
+        delete entry.first;
+    }
     for (auto device : device_list) {
         delete device;
     }
@@ -151,7 +160,11 @@ urma_context_t *urma_create_context(urma_device_t *device, uint32_t eid_index) {
         return nullptr;
     }
     urma_context_t *ctx = new urma_context_t;
-    ctx->async_fd = 0;
+    ctx->async_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (ctx->async_fd < 0) {
+        delete ctx;
+        return nullptr;
+    }
     ctx->dev = device;
     context_map[ctx] = 1;
     return ctx;
@@ -163,6 +176,9 @@ urma_status_t urma_delete_context(urma_context_t *ctx) {
         return URMA_EINVAL;
     }
     context_map.erase(ctx);
+    if (ctx->async_fd >= 0) {
+        close(ctx->async_fd);
+    }
     delete ctx;
     return URMA_SUCCESS;
 }

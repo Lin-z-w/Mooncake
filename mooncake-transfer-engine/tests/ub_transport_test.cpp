@@ -18,9 +18,13 @@
 #include <sys/time.h>
 
 #include <cstdlib>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <thread>
 
 #include "transfer_engine.h"
 #include "transport/transport.h"
@@ -46,6 +50,64 @@ DEFINE_string(nic_priority_matrix, "",
               "Path to UB NIC priority matrix file (Advanced)");
 
 DEFINE_string(segment_id, "127.0.0.1", "Segment ID to access data");
+DEFINE_int32(transfer_timeout_ms, 30000,
+             "Timeout for each UB transfer test iteration");
+
+std::string transferStatusToString(TransferStatusEnum status) {
+    switch (status) {
+        case TransferStatusEnum::WAITING:
+            return "WAITING";
+        case TransferStatusEnum::PENDING:
+            return "PENDING";
+        case TransferStatusEnum::INVALID:
+            return "INVALID";
+        case TransferStatusEnum::CANCELED:
+            return "CANCELED";
+        case TransferStatusEnum::COMPLETED:
+            return "COMPLETED";
+        case TransferStatusEnum::TIMEOUT:
+            return "TIMEOUT";
+        case TransferStatusEnum::FAILED:
+            return "FAILED";
+    }
+    return "UNKNOWN";
+}
+
+::testing::AssertionResult waitForTransfer(TransferEngine *engine,
+                                           BatchID batch_id, size_t task_id,
+                                           const std::string &operation) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(FLAGS_transfer_timeout_ms);
+    TransferStatus status{TransferStatusEnum::WAITING, 0};
+    Status s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        s = engine->getTransferStatus(batch_id, task_id, status);
+        if (!s.ok()) {
+            return ::testing::AssertionFailure()
+                   << operation
+                   << " getTransferStatus failed: " << s.ToString();
+        }
+        if (status.s == TransferStatusEnum::COMPLETED) {
+            return ::testing::AssertionSuccess();
+        }
+        if (status.s == TransferStatusEnum::FAILED) {
+            return ::testing::AssertionFailure()
+                   << operation << " failed after transferring "
+                   << status.transferred_bytes << " bytes";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    auto &batch = Transport::toBatchDesc(batch_id);
+    auto &task = batch.task_list[task_id];
+    return ::testing::AssertionFailure()
+           << operation << " timed out after " << FLAGS_transfer_timeout_ms
+           << " ms; last status=" << transferStatusToString(status.s)
+           << ", transferred_bytes=" << status.transferred_bytes
+           << ", slices=" << task.slice_count
+           << ", success_slices=" << task.success_slice_count
+           << ", failed_slices=" << task.failed_slice_count;
+}
 
 std::string formatDeviceNames(const std::string &device_names) {
     std::stringstream ss(device_names);
@@ -162,18 +224,7 @@ TEST_F(UBTransportTest, MultiWrite) {
         entry.target_offset = remote_base;
         s = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(s.ok());
-        bool completed = false;
-        TransferStatus status;
-        while (!completed) {
-            s = engine->getTransferStatus(batch_id, 0, status);
-            ASSERT_EQ(s, Status::OK());
-            if (status.s == TransferStatusEnum::COMPLETED)
-                completed = true;
-            else if (status.s == TransferStatusEnum::FAILED) {
-                LOG(INFO) << "FAILED";
-                completed = true;
-            }
-        }
+        ASSERT_TRUE(waitForTransfer(engine.get(), batch_id, 0, "MultiWrite"));
         s = engine->freeBatchID(batch_id);
         ASSERT_EQ(s, Status::OK());
     }
@@ -196,18 +247,8 @@ TEST_F(UBTransportTest, MultipleRead) {
         entry.target_offset = remote_base;
         s = engine->submitTransfer(batch_id, {entry});
         LOG_ASSERT(s.ok());
-        bool completed = false;
-        TransferStatus status;
-        while (!completed) {
-            s = engine->getTransferStatus(batch_id, 0, status);
-            ASSERT_EQ(s, Status::OK());
-            if (status.s == TransferStatusEnum::COMPLETED)
-                completed = true;
-            else if (status.s == TransferStatusEnum::FAILED) {
-                LOG(INFO) << "FAILED";
-                completed = true;
-            }
-        }
+        ASSERT_TRUE(
+            waitForTransfer(engine.get(), batch_id, 0, "MultipleRead.Write"));
         s = engine->freeBatchID(batch_id);
         ASSERT_EQ(s, Status::OK());
     }
@@ -224,17 +265,8 @@ TEST_F(UBTransportTest, MultipleRead) {
         Status s;
         s = engine->submitTransfer(batch_id, {entry});
         ASSERT_EQ(s, Status::OK());
-        bool completed = false;
-        TransferStatus status;
-        while (!completed) {
-            s = engine->getTransferStatus(batch_id, 0, status);
-            ASSERT_EQ(s, Status::OK());
-            if (status.s == TransferStatusEnum::COMPLETED)
-                completed = true;
-            else if (status.s == TransferStatusEnum::FAILED) {
-                completed = true;
-            }
-        }
+        ASSERT_TRUE(
+            waitForTransfer(engine.get(), batch_id, 0, "MultipleRead.Read"));
         s = engine->freeBatchID(batch_id);
         ASSERT_EQ(s, Status::OK());
     }
