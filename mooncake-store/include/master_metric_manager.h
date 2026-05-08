@@ -1,7 +1,9 @@
 #pragma once
 
+#include <chrono>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "ylt/metric/counter.hpp"
 #include "ylt/metric/gauge.hpp"
@@ -306,7 +308,97 @@ class MasterMetricManager {
     // Update all metrics once to ensure zero values are serialized
     void update_metrics_for_zero_output();
 
+    struct SummaryCounters {
+        int64_t exist_keys = 0;
+        int64_t exist_key_fails = 0;
+        int64_t put_starts = 0;
+        int64_t put_start_fails = 0;
+        int64_t put_ends = 0;
+        int64_t put_end_fails = 0;
+        int64_t put_revoke_requests = 0;
+        int64_t put_revoke_fails = 0;
+        int64_t get_replicas = 0;
+        int64_t get_replica_fails = 0;
+        int64_t removes = 0;
+        int64_t remove_fails = 0;
+        int64_t remove_all = 0;
+        int64_t remove_all_fails = 0;
+        int64_t create_move_tasks = 0;
+        int64_t create_move_task_fails = 0;
+        int64_t create_copy_tasks = 0;
+        int64_t create_copy_task_fails = 0;
+        int64_t query_tasks = 0;
+        int64_t query_task_fails = 0;
+        int64_t fetch_tasks = 0;
+        int64_t fetch_task_fails = 0;
+        int64_t copy_starts = 0;
+        int64_t copy_start_fails = 0;
+        int64_t copy_ends = 0;
+        int64_t copy_end_fails = 0;
+        int64_t copy_revokes = 0;
+        int64_t copy_revoke_fails = 0;
+        int64_t move_starts = 0;
+        int64_t move_start_fails = 0;
+        int64_t move_ends = 0;
+        int64_t move_end_fails = 0;
+        int64_t move_revokes = 0;
+        int64_t move_revoke_fails = 0;
+        int64_t evict_disk_replicas = 0;
+        int64_t evict_disk_replica_fails = 0;
+        int64_t batch_put_start_requests = 0;
+        int64_t batch_put_start_fails = 0;
+        int64_t batch_put_start_partial_successes = 0;
+        int64_t batch_put_start_items = 0;
+        int64_t batch_put_start_failed_items = 0;
+        int64_t batch_put_end_requests = 0;
+        int64_t batch_put_end_fails = 0;
+        int64_t batch_put_end_partial_successes = 0;
+        int64_t batch_put_end_items = 0;
+        int64_t batch_put_end_failed_items = 0;
+        int64_t batch_put_revoke_requests = 0;
+        int64_t batch_put_revoke_fails = 0;
+        int64_t batch_put_revoke_partial_successes = 0;
+        int64_t batch_put_revoke_items = 0;
+        int64_t batch_put_revoke_failed_items = 0;
+        int64_t batch_get_replica_list_requests = 0;
+        int64_t batch_get_replica_list_fails = 0;
+        int64_t batch_get_replica_list_partial_successes = 0;
+        int64_t batch_get_replica_list_items = 0;
+        int64_t batch_get_replica_list_failed_items = 0;
+        int64_t batch_exist_key_requests = 0;
+        int64_t batch_exist_key_fails = 0;
+        int64_t batch_exist_key_partial_successes = 0;
+        int64_t batch_exist_key_items = 0;
+        int64_t batch_exist_key_failed_items = 0;
+        int64_t batch_query_ip_requests = 0;
+        int64_t batch_query_ip_fails = 0;
+        int64_t batch_query_ip_partial_successes = 0;
+        int64_t batch_query_ip_items = 0;
+        int64_t batch_query_ip_failed_items = 0;
+        int64_t batch_replica_clear_requests = 0;
+        int64_t batch_replica_clear_fails = 0;
+        int64_t batch_replica_clear_partial_successes = 0;
+        int64_t batch_replica_clear_items = 0;
+        int64_t batch_replica_clear_failed_items = 0;
+        int64_t eviction_success = 0;
+        int64_t eviction_attempts = 0;
+        int64_t evicted_key_count = 0;
+        int64_t evicted_size = 0;
+        int64_t ping = 0;
+        int64_t ping_fails = 0;
+        int64_t mark_task_to_complete_requests = 0;
+        int64_t mark_task_to_complete_fails = 0;
+    };
+
+    struct SummarySnapshot {
+        bool initialized = false;
+        std::chrono::steady_clock::time_point timestamp;
+        SummaryCounters counters;
+    };
+
     // --- Metric Members ---
+    std::mutex summary_snapshot_mutex_;
+    SummarySnapshot summary_snapshot_;
 
     // Memory Storage Metrics
     ylt::metric::gauge_t

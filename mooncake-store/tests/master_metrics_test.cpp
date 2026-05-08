@@ -1,6 +1,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <csignal>
 #include <thread>
 #include <vector>
@@ -509,6 +510,42 @@ TEST_F(MasterMetricsTest, BatchRequestTest) {
     ASSERT_EQ(metrics.get_batch_put_start_failures(), 0);
     ASSERT_EQ(metrics.get_batch_put_start_items(), 7);
     ASSERT_EQ(metrics.get_batch_put_start_failed_items(), 3);
+}
+
+TEST_F(MasterMetricsTest, SummaryUsesWindowRatesAndEvictionDeltas) {
+    auto& metrics = MasterMetricManager::instance();
+
+    const std::string baseline_summary = metrics.get_summary_string();
+    EXPECT_NE(baseline_summary.find("Requests (Success/Total per sec):"),
+              std::string::npos);
+    EXPECT_NE(baseline_summary.find("PutStart=0.00/0.00/s"), std::string::npos);
+
+    metrics.inc_put_start_requests(4);
+    metrics.inc_put_start_failures(1);
+    metrics.inc_batch_put_start_requests(5);
+    metrics.inc_batch_put_start_partial_success(2);
+    metrics.inc_eviction_success(3, 4096);
+    metrics.inc_eviction_fail();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const std::string window_summary = metrics.get_summary_string();
+    EXPECT_NE(window_summary.find("Requests (Success/Total per sec):"),
+              std::string::npos);
+    EXPECT_NE(window_summary.find("PutStart="), std::string::npos);
+    EXPECT_NE(window_summary.find("/s"), std::string::npos);
+    EXPECT_EQ(window_summary.find("PutStart=3/4"), std::string::npos);
+    EXPECT_NE(window_summary.find("Batch Requests (per sec"),
+              std::string::npos);
+    EXPECT_NE(window_summary.find(
+                  "Eviction: Success/Attempts=1/2, keys=3, size=4.00 KB"),
+              std::string::npos);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const std::string idle_summary = metrics.get_summary_string();
+    EXPECT_NE(idle_summary.find("PutStart=0.00/0.00/s"), std::string::npos);
+    EXPECT_NE(
+        idle_summary.find("Eviction: Success/Attempts=0/0, keys=0, size=0 B"),
+        std::string::npos);
 }
 
 }  // namespace mooncake::test
