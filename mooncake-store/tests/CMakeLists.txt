@@ -134,6 +134,8 @@ target_link_libraries(
 if(STORE_USE_ETCD OR STORE_USE_REDIS)
   add_test(NAME high_availability_test COMMAND high_availability_test)
 endif()
+add_ha_test(ha_backend_availability_test
+            ha/leadership/ha_backend_availability_test.cpp)
 
 add_executable(stress_workload_test stress_workload_test.cpp)
 target_link_libraries(

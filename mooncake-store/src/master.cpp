@@ -107,7 +107,7 @@ DEFINE_validator(eviction_ratio, [](const char* flagname, double value) {
     return true;
 });
 DEFINE_bool(enable_ha, false,
-            "Enable high availability, which depends on etcd");
+            "Enable high availability with the configured HA backend");
 DEFINE_bool(enable_offload, false, "Enable offload availability");
 DEFINE_bool(offload_on_evict, false,
             "Defer LOCAL_DISK offload to eviction time instead of PutEnd");
