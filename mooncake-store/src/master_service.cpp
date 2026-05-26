@@ -5619,29 +5619,38 @@ MasterService::MetadataSerializer::SerializeShard(const MetadataShard& shard,
 
     // Sort tenant/key pairs to ensure consistent serialization order.
     // NOTE: sort may be slow for large shards.
-    std::vector<std::pair<std::string, std::string>> sorted_keys;
-    sorted_keys.reserve(metadata_count);
+    struct SortedEntry {
+        std::string tenant_id;
+        std::string key;
+        const ObjectMetadata* metadata;
+    };
+    std::vector<SortedEntry> sorted_entries;
+    sorted_entries.reserve(metadata_count);
     for (const auto& [tenant_id, tenant_state] : shard.tenants) {
         for (const auto& [key, metadata] : tenant_state.metadata) {
-            sorted_keys.emplace_back(tenant_id, key);
+            sorted_entries.push_back({tenant_id, key, &metadata});
         }
     }
-    std::sort(sorted_keys.begin(), sorted_keys.end());
+    std::sort(sorted_entries.begin(), sorted_entries.end(),
+              [](const SortedEntry& lhs, const SortedEntry& rhs) {
+                  if (lhs.tenant_id != rhs.tenant_id) {
+                      return lhs.tenant_id < rhs.tenant_id;
+                  }
+                  return lhs.key < rhs.key;
+              });
 
-    for (const auto& [tenant_id, key] : sorted_keys) {
-        const auto& tenant_state = shard.tenants.at(tenant_id);
-        const auto& metadata = tenant_state.metadata.at(key);
+    for (const auto& entry : sorted_entries) {
         // Each metadata item format: [tenant_id, key, metadata_object].
         packer.pack_array(3);
-        packer.pack(tenant_id);
-        packer.pack(key);
+        packer.pack(entry.tenant_id);
+        packer.pack(entry.key);
 
-        auto result = SerializeMetadata(metadata, packer);
+        auto result = SerializeMetadata(*entry.metadata, packer);
         if (!result) {
             return tl::make_unexpected(SerializationError(
                 result.error().code,
                 fmt::format("Failed to serialize metadata for key '{}': {}",
-                            key, result.error().message)));
+                            entry.key, result.error().message)));
         }
     }
 
