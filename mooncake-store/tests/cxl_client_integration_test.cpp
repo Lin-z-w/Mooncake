@@ -309,7 +309,7 @@ TEST_F(ClientIntegrationTestCxl, BasicPutGetOperations) {
         << "Second Put operation failed: " << toString(put_result2.error());
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result.has_value())
         << "Remove operation failed: " << toString(remove_result.error());
     client_buffer_allocator_->deallocate(buffer, test_data.size());

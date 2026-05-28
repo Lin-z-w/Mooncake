@@ -751,11 +751,6 @@ auto MasterService::UnmountNoFSegment(const UUID& segment_id,
 #endif
 }
 
-auto MasterService::ExistKey(const std::string& key)
-    -> tl::expected<bool, ErrorCode> {
-    return ExistKey(key, "default");
-}
-
 auto MasterService::ExistKey(const std::string& key,
                              const std::string& tenant_id)
     -> tl::expected<bool, ErrorCode> {
@@ -775,11 +770,6 @@ auto MasterService::ExistKey(const std::string& key,
     }
 
     return false;  // If no complete replica is found, return false
-}
-
-std::vector<tl::expected<bool, ErrorCode>> MasterService::BatchExistKey(
-    const std::vector<std::string>& keys) {
-    return BatchExistKey(keys, "default");
 }
 
 std::vector<tl::expected<bool, ErrorCode>> MasterService::BatchExistKey(
@@ -1047,13 +1037,6 @@ auto MasterService::BatchReplicaClear(
     return cleared_keys;
 }
 
-auto MasterService::GetReplicaListByRegex(const std::string& regex_pattern)
-    -> tl::expected<
-        std::unordered_map<std::string, std::vector<Replica::Descriptor>>,
-        ErrorCode> {
-    return GetReplicaListByRegex(regex_pattern, "default");
-}
-
 auto MasterService::GetReplicaListByRegex(const std::string& regex_pattern,
                                           const std::string& tenant_id)
     -> tl::expected<
@@ -1102,11 +1085,6 @@ auto MasterService::GetReplicaListByRegex(const std::string& regex_pattern,
     }
 
     return results;
-}
-
-auto MasterService::GetReplicaList(const std::string& key)
-    -> tl::expected<GetReplicaListResponse, ErrorCode> {
-    return GetReplicaList(key, "default");
 }
 
 auto MasterService::GetReplicaList(const std::string& key,
@@ -1317,13 +1295,6 @@ auto MasterService::AllocateAndInsertMetadata(
 }
 
 auto MasterService::PutStart(const UUID& client_id, const std::string& key,
-                             const uint64_t slice_length,
-                             const ReplicateConfig& config)
-    -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
-    return PutStart(client_id, key, "default", slice_length, config);
-}
-
-auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                              const std::string& tenant_id,
                              const uint64_t slice_length,
                              const ReplicateConfig& config)
@@ -1399,12 +1370,6 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     return AllocateAndInsertMetadata(tenant_state, client_id, object_id,
                                      slice_length, config, now);
-}
-
-auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
-                           ReplicaType replica_type)
-    -> tl::expected<void, ErrorCode> {
-    return PutEnd(client_id, key, "default", replica_type);
 }
 
 auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
@@ -1529,12 +1494,6 @@ auto MasterService::AddReplica(const UUID& client_id, const std::string& key,
 }
 
 auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
-                              ReplicaType replica_type)
-    -> tl::expected<void, ErrorCode> {
-    return PutRevoke(client_id, key, "default", replica_type);
-}
-
-auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
                               const std::string& tenant_id,
                               ReplicaType replica_type)
     -> tl::expected<void, ErrorCode> {
@@ -1594,12 +1553,6 @@ auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
 
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEnd(
     const UUID& client_id, const std::vector<std::string>& keys,
-    ReplicaType replica_type) {
-    return BatchPutEnd(client_id, keys, "default", replica_type);
-}
-
-std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEnd(
-    const UUID& client_id, const std::vector<std::string>& keys,
     const std::string& tenant_id, ReplicaType replica_type) {
     std::vector<tl::expected<void, ErrorCode>> results;
     results.reserve(keys.size());
@@ -1607,12 +1560,6 @@ std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEnd(
         results.emplace_back(PutEnd(client_id, key, tenant_id, replica_type));
     }
     return results;
-}
-
-std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutRevoke(
-    const UUID& client_id, const std::vector<std::string>& keys,
-    ReplicaType replica_type) {
-    return BatchPutRevoke(client_id, keys, "default", replica_type);
 }
 
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutRevoke(
@@ -1641,13 +1588,6 @@ std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutRevoke(
 //
 // Note: during Case B the key is temporarily unreadable (all replicas are
 // PROCESSING).  Readers will get REPLICA_IS_NOT_READY until UpsertEnd.
-auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
-                                const uint64_t slice_length,
-                                const ReplicateConfig& config)
-    -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
-    return UpsertStart(client_id, key, "default", slice_length, config);
-}
-
 auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                                 const std::string& tenant_id,
                                 const uint64_t slice_length,
@@ -1848,12 +1788,6 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
 }
 
 auto MasterService::UpsertEnd(const UUID& client_id, const std::string& key,
-                              ReplicaType replica_type)
-    -> tl::expected<void, ErrorCode> {
-    return PutEnd(client_id, key, replica_type);
-}
-
-auto MasterService::UpsertEnd(const UUID& client_id, const std::string& key,
                               const std::string& tenant_id,
                               ReplicaType replica_type)
     -> tl::expected<void, ErrorCode> {
@@ -1861,24 +1795,10 @@ auto MasterService::UpsertEnd(const UUID& client_id, const std::string& key,
 }
 
 auto MasterService::UpsertRevoke(const UUID& client_id, const std::string& key,
-                                 ReplicaType replica_type)
-    -> tl::expected<void, ErrorCode> {
-    return PutRevoke(client_id, key, replica_type);
-}
-
-auto MasterService::UpsertRevoke(const UUID& client_id, const std::string& key,
                                  const std::string& tenant_id,
                                  ReplicaType replica_type)
     -> tl::expected<void, ErrorCode> {
     return PutRevoke(client_id, key, tenant_id, replica_type);
-}
-
-std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
-MasterService::BatchUpsertStart(const UUID& client_id,
-                                const std::vector<std::string>& keys,
-                                const std::vector<uint64_t>& slice_lengths,
-                                const ReplicateConfig& config) {
-    return BatchUpsertStart(client_id, keys, "default", slice_lengths, config);
 }
 
 std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
@@ -1905,19 +1825,9 @@ MasterService::BatchUpsertStart(const UUID& client_id,
 }
 
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchUpsertEnd(
-    const UUID& client_id, const std::vector<std::string>& keys) {
-    return BatchPutEnd(client_id, keys);
-}
-
-std::vector<tl::expected<void, ErrorCode>> MasterService::BatchUpsertEnd(
     const UUID& client_id, const std::vector<std::string>& keys,
     const std::string& tenant_id) {
     return BatchPutEnd(client_id, keys, tenant_id);
-}
-
-std::vector<tl::expected<void, ErrorCode>> MasterService::BatchUpsertRevoke(
-    const UUID& client_id, const std::vector<std::string>& keys) {
-    return BatchPutRevoke(client_id, keys);
 }
 
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchUpsertRevoke(
@@ -2422,11 +2332,6 @@ tl::expected<void, ErrorCode> MasterService::MoveRevoke(
     return {};
 }
 
-auto MasterService::Remove(const std::string& key, bool force)
-    -> tl::expected<void, ErrorCode> {
-    return Remove(key, "default", force);
-}
-
 auto MasterService::Remove(const std::string& key, const std::string& tenant_id,
                            bool force) -> tl::expected<void, ErrorCode> {
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
@@ -2464,11 +2369,6 @@ auto MasterService::Remove(const std::string& key, const std::string& tenant_id,
     ErasePromotionTaskIfPresent(tenant_state, key);
     accessor.Erase();
     return {};
-}
-
-auto MasterService::RemoveByRegex(const std::string& regex_pattern, bool force)
-    -> tl::expected<long, ErrorCode> {
-    return RemoveByRegex(regex_pattern, "default", force);
 }
 
 auto MasterService::RemoveByRegex(const std::string& regex_pattern,
@@ -2590,12 +2490,6 @@ long MasterService::RemoveAll(const std::string& tenant_id, bool force) {
             << ", removed_count=" << removed_count
             << ", total_freed_size=" << total_freed_size;
     return removed_count;
-}
-
-auto MasterService::BatchRemove(const std::vector<std::string>& keys,
-                                bool force)
-    -> std::vector<tl::expected<void, ErrorCode>> {
-    return BatchRemove(keys, "default", force);
 }
 
 auto MasterService::BatchRemove(const std::vector<std::string>& keys,

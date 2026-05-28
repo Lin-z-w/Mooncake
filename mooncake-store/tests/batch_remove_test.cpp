@@ -181,7 +181,7 @@ TEST_F(BatchRemoveTest, BasicFunctionality) {
         PutKey(keys.back(), "test data");
     }
 
-    auto results = test_client_->BatchRemove(keys);
+    auto results = test_client_->BatchRemove(keys, "default");
 
     ASSERT_EQ(results.size(), keys.size());
     for (size_t i = 0; i < results.size(); ++i) {
@@ -208,7 +208,7 @@ TEST_F(BatchRemoveTest, MixedExistence) {
     std::vector<std::string> keys = existing_keys;
     keys.insert(keys.end(), non_existing_keys.begin(), non_existing_keys.end());
 
-    auto results = test_client_->BatchRemove(keys);
+    auto results = test_client_->BatchRemove(keys, "default");
 
     ASSERT_EQ(results.size(), keys.size());
     // Verify existing keys removed (have value)
@@ -227,7 +227,7 @@ TEST_F(BatchRemoveTest, MixedExistence) {
 TEST_F(BatchRemoveTest, EmptyAndDuplicate) {
     // Empty list
     std::vector<std::string> empty_keys;
-    auto results = test_client_->BatchRemove(empty_keys);
+    auto results = test_client_->BatchRemove(empty_keys, "default");
     EXPECT_EQ(results.size(), 0);
 
     // Duplicate keys
@@ -235,7 +235,7 @@ TEST_F(BatchRemoveTest, EmptyAndDuplicate) {
     PutKey(key, "data");
 
     std::vector<std::string> dup_keys = {key, key, key};
-    results = test_client_->BatchRemove(dup_keys);
+    results = test_client_->BatchRemove(dup_keys, "default");
 
     ASSERT_EQ(results.size(), 3);
     EXPECT_TRUE(results[0].has_value()) << "First remove should succeed";
@@ -251,8 +251,8 @@ TEST_F(BatchRemoveTest, ConsistencyWithSingleRemove) {
     // Test non-existing key
     std::string key1 = "test_consistency_nonexist";
 
-    auto single_result = test_client_->Remove(key1);
-    auto batch_results = test_client_->BatchRemove({key1});
+    auto single_result = test_client_->Remove(key1, "default");
+    auto batch_results = test_client_->BatchRemove({key1}, "default");
 
     ASSERT_EQ(batch_results.size(), 1);
     // Both should fail
@@ -265,11 +265,11 @@ TEST_F(BatchRemoveTest, ConsistencyWithSingleRemove) {
     std::string key2 = "test_consistency_exist";
     PutKey(key2, "data");
 
-    single_result = test_client_->Remove(key2);
+    single_result = test_client_->Remove(key2, "default");
 
     std::string key3 = "test_consistency_exist2";
     PutKey(key3, "data");
-    batch_results = test_client_->BatchRemove({key3});
+    batch_results = test_client_->BatchRemove({key3}, "default");
 
     ASSERT_EQ(batch_results.size(), 1);
     EXPECT_TRUE(single_result.has_value())
@@ -283,7 +283,7 @@ TEST_F(BatchRemoveTest, ErrorCodeFormat) {
     std::string key = "test_error_format";
     // Don't put, so it doesn't exist
 
-    auto results = test_client_->BatchRemove({key});
+    auto results = test_client_->BatchRemove({key}, "default");
 
     ASSERT_EQ(results.size(), 1);
     EXPECT_FALSE(results[0].has_value());
@@ -310,7 +310,7 @@ TEST_F(BatchRemoveTest, LargeBatch) {
 
     // Measure time
     auto start = std::chrono::high_resolution_clock::now();
-    auto results = test_client_->BatchRemove(keys);
+    auto results = test_client_->BatchRemove(keys, "default");
     auto end = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> elapsed = end - start;
@@ -344,7 +344,7 @@ TEST_F(BatchRemoveTest, SpecialCharacters) {
         PutKey(key, "data");
     }
 
-    auto results = test_client_->BatchRemove(special_keys);
+    auto results = test_client_->BatchRemove(special_keys, "default");
 
     ASSERT_EQ(results.size(), special_keys.size());
     for (size_t i = 0; i < results.size(); ++i) {

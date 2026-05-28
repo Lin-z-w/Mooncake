@@ -335,7 +335,7 @@ TEST_F(ClientIntegrationTest, BasicPutGetOperations) {
         << "Second Put operation failed: " << toString(put_result2.error());
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result.has_value())
         << "Remove operation failed: " << toString(remove_result.error());
     client_buffer_allocator_->deallocate(buffer, test_data.size());
@@ -359,7 +359,7 @@ TEST_F(ClientIntegrationTest, RemoveOperation) {
     client_buffer_allocator_->deallocate(buffer, test_data.size());
 
     // Remove the data
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result.has_value())
         << "Remove operation failed: " << toString(remove_result.error());
 
@@ -432,7 +432,7 @@ TEST_F(ClientIntegrationTest, LocalPreferredAllocationTest) {
     // Clean up
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result2 = test_client_->Remove(key);
+    auto remove_result2 = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result2.has_value())
         << "Remove operation failed: " << toString(remove_result2.error());
 }
@@ -499,7 +499,7 @@ TEST_F(ClientIntegrationTest, DISABLED_AllocateTest) {
     ASSERT_TRUE(success_put_result.has_value())
         << "Put operation failed: " << toString(success_put_result.error());
     client_buffer_allocator_->deallocate(success_buffer, data_size);
-    auto success_remove_result = test_client_->Remove(allocate_failed_key);
+    auto success_remove_result = test_client_->Remove(allocate_failed_key, "default");
     ASSERT_TRUE(success_remove_result.has_value())
         << "Remove operation failed: "
         << toString(success_remove_result.error());
@@ -559,7 +559,7 @@ TEST_F(ClientIntegrationTest, LargeAllocateTest) {
     // Remove the key
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result.has_value())
         << "Remove operation failed: " << toString(remove_result.error());
 }
@@ -725,7 +725,7 @@ TEST_F(ClientIntegrationTest, BatchIsExistOperations) {
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
     for (int i = 0; i < batch_size / 2; i++) {
-        auto remove_result = test_client_->Remove(keys[i]);
+        auto remove_result = test_client_->Remove(keys[i], "default");
         ASSERT_TRUE(remove_result.has_value())
             << "Remove operation failed: " << toString(remove_result.error());
     }
@@ -871,7 +871,7 @@ TEST_F(ClientIntegrationTest, BatchPutDuplicateKeys) {
     // Clean up the key that was successfully put
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     // Remove might fail if the key wasn't actually put, which is fine
     ASSERT_TRUE(remove_result);
 }
@@ -1138,7 +1138,7 @@ TEST_F(ClientIntegrationTest, ReplicaCopyAndMoveOperations) {
             500));  // Give some time for initial attempt
 
         // Free space by removing one of the fill keys.
-        test_client_->Remove(fill_keys.front());
+        test_client_->Remove(fill_keys.front(, "default"));
 
         // Poll task: should succeed after space is freed.
         auto status =
@@ -1495,7 +1495,7 @@ TEST_F(ClientIntegrationTest, UpsertNewKey) {
     // Clean up
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result.has_value())
         << "Remove failed: " << toString(remove_result.error());
 }
@@ -1553,7 +1553,7 @@ TEST_F(ClientIntegrationTest, UpsertSameSize) {
     // Clean up
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result.has_value())
         << "Remove failed: " << toString(remove_result.error());
 }
@@ -1612,7 +1612,7 @@ TEST_F(ClientIntegrationTest, UpsertDifferentSize) {
     // Clean up
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
-    auto remove_result = test_client_->Remove(key);
+    auto remove_result = test_client_->Remove(key, "default");
     ASSERT_TRUE(remove_result.has_value())
         << "Remove failed: " << toString(remove_result.error());
 }
@@ -1728,7 +1728,7 @@ TEST_F(ClientIntegrationTest, BatchUpsertMixed) {
     std::this_thread::sleep_for(
         std::chrono::milliseconds(default_kv_lease_ttl_));
     for (const auto& key : keys) {
-        auto r = test_client_->Remove(key);
+        auto r = test_client_->Remove(key, "default");
         EXPECT_TRUE(r.has_value())
             << "Remove failed for " << key << ": " << toString(r.error());
     }

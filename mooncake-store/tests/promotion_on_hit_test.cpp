@@ -71,9 +71,11 @@ class PromotionOnHitTest : public ::testing::Test {
                    const std::string& key, size_t size = 1024) {
         ReplicateConfig config;
         config.replica_num = 1;
-        auto put_start = service.PutStart(client_id, key, size, config);
+        auto put_start =
+            service.PutStart(client_id, key, "default", size, config);
         ASSERT_TRUE(put_start.has_value()) << "PutStart failed for key=" << key;
-        auto put_end = service.PutEnd(client_id, key, ReplicaType::MEMORY);
+        auto put_end =
+            service.PutEnd(client_id, key, "default", ReplicaType::MEMORY);
         ASSERT_TRUE(put_end.has_value()) << "PutEnd failed for key=" << key;
     }
 
@@ -122,7 +124,7 @@ TEST_F(PromotionOnHitTest, DefaultOffNoPromotion) {
     // GetReplicaList many times. With promotion_on_hit=false, nothing should
     // appear in promotion_objects regardless of access count.
     for (int i = 0; i < 5; ++i) {
-        auto resp = service->GetReplicaList("k1");
+        auto resp = service->GetReplicaList("k1", "default");
         ASSERT_TRUE(resp.has_value());
     }
 
@@ -149,7 +151,7 @@ TEST_F(PromotionOnHitTest, NoLocalDiskNoPromotion) {
 
     PutObject(*service, ctx.client_id, "k_mem_only");
     for (int i = 0; i < 5; ++i) {
-        auto resp = service->GetReplicaList("k_mem_only");
+        auto resp = service->GetReplicaList("k_mem_only", "default");
         ASSERT_TRUE(resp.has_value());
     }
 
@@ -181,7 +183,7 @@ TEST_F(PromotionOnHitTest, MemoryReplicaPresentNoPromotion) {
                                        ctx.segment_name));
 
     for (int i = 0; i < 5; ++i) {
-        auto resp = service->GetReplicaList("k_dual");
+        auto resp = service->GetReplicaList("k_dual", "default");
         ASSERT_TRUE(resp.has_value());
     }
 
@@ -263,7 +265,7 @@ TEST_F(PromotionOnHitTest, RacingReadersDedup) {
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&service]() {
             for (int j = 0; j < kReadsPerThread; ++j) {
-                auto r = service->GetReplicaList("k_cold");
+                auto r = service->GetReplicaList("k_cold", "default");
                 EXPECT_TRUE(r.has_value());
             }
         });
@@ -310,7 +312,7 @@ TEST_F(PromotionOnHitTest, StalePromotionReaper) {
     // the per-shard PromotionTask intact (the heartbeat is best-effort GC,
     // not the authoritative state).
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
         auto pending = service->PromotionObjectHeartbeat(ctx.client_id);
         ASSERT_TRUE(pending.has_value());
@@ -320,7 +322,7 @@ TEST_F(PromotionOnHitTest, StalePromotionReaper) {
     // Without reap, dedup blocks re-enqueue. Confirm: GetReplicaList again,
     // heartbeat must be empty because PromotionTask still pins the slot.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
         auto pending = service->PromotionObjectHeartbeat(ctx.client_id);
         ASSERT_TRUE(pending.has_value());
@@ -336,7 +338,7 @@ TEST_F(PromotionOnHitTest, StalePromotionReaper) {
     // Trigger #3: with the task reaped, dedup is unblocked and a fresh
     // GetReplicaList must enqueue again.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
         auto pending = service->PromotionObjectHeartbeat(ctx.client_id);
         ASSERT_TRUE(pending.has_value());
@@ -370,12 +372,12 @@ TEST_F(PromotionOnHitTest, RemoveDuringPromotion) {
 
     // Queue a promotion task.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
 
     // Lease must expire before we can call non-force Remove (or use force).
-    auto rm = service->Remove("k_cold", /*force=*/true);
+    auto rm = service->Remove("k_cold", "default", /*force=*/true);
     // Remove returns REPLICA_IS_NOT_READY if any replica is non-COMPLETE.
     // The injected LOCAL_DISK replica is COMPLETE, so this should succeed.
     ASSERT_TRUE(rm.has_value())
@@ -397,7 +399,7 @@ TEST_F(PromotionOnHitTest, RemoveDuringPromotion) {
     ASSERT_TRUE(InjectLocalDiskReplica(*service, ctx.client_id, "k_cold", 1024,
                                        ctx.segment_name));
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
         auto pending = service->PromotionObjectHeartbeat(ctx.client_id);
         ASSERT_TRUE(pending.has_value());
@@ -437,7 +439,7 @@ TEST_F(PromotionOnHitTest, MultiSegmentAllocPicksAvailableSegment) {
     // Seed the PromotionTask through the gate — PromotionAllocStart now
     // requires an in-flight task to exist (rejects orphaned-stage path).
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -487,7 +489,7 @@ TEST_F(PromotionOnHitTest, MultiSegmentAllocRespectsPreferred) {
     // Seed the PromotionTask through the gate so AllocStart's
     // task-existence check passes.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -548,13 +550,13 @@ TEST_F(PromotionOnHitTest, QueueLimitRejectsBeyondCap) {
                                        seg.segment_name));
 
     // First read on k1 enqueues a task in shard S.
-    auto r1 = service->GetReplicaList(k1);
+    auto r1 = service->GetReplicaList(k1, "default");
     ASSERT_TRUE(r1.has_value());
 
     // Second read on k2 (same shard S, different key, so no dedup) must
     // be dropped by the cap gate: the cluster-wide in-flight counter is
     // already 1, which meets promotion_queue_limit_ = 1.
-    auto r2 = service->GetReplicaList(k2);
+    auto r2 = service->GetReplicaList(k2, "default");
     ASSERT_TRUE(r2.has_value()) << "read itself must still succeed; "
                                 << "queue gate is silent";
 
@@ -597,7 +599,7 @@ TEST_F(PromotionOnHitTest, HeartbeatBoundedBatchPreservesLeftovers) {
     for (const auto& k : keys) {
         ASSERT_TRUE(InjectLocalDiskReplica(*service, seg.client_id, k, 1024,
                                            seg.segment_name));
-        auto r = service->GetReplicaList(k);
+        auto r = service->GetReplicaList(k, "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -636,7 +638,7 @@ TEST_F(PromotionOnHitTest, HeartbeatBoundedBatchPreservesLeftovers) {
     // (they're cleared by NotifyPromotionSuccess, not by Heartbeat), so the
     // source refcnts remain pinned until processed.
     for (const auto& k : keys) {
-        auto rl = service->GetReplicaList(k);
+        auto rl = service->GetReplicaList(k, "default");
         ASSERT_TRUE(rl.has_value()) << "key " << k << " should still exist";
     }
 
@@ -678,7 +680,7 @@ TEST_F(PromotionOnHitTest, ReaperPopsStagedMemoryReplicaOnExpiry) {
 
     // Trigger the gate to enqueue a PromotionTask.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
     // Drive the AllocStart side so alloc_id != 0 — this is the exact
@@ -771,12 +773,12 @@ TEST_F(PromotionOnHitTest, QueueLimitRejectsCrossShard) {
     ASSERT_TRUE(InjectLocalDiskReplica(*service, seg.client_id, k2, 1024,
                                        seg.segment_name));
 
-    auto r1 = service->GetReplicaList(k1);
+    auto r1 = service->GetReplicaList(k1, "default");
     ASSERT_TRUE(r1.has_value());
 
     // k2 lives in a different shard, but the global cap is already met
     // by k1's task — k2 must be rejected.
-    auto r2 = service->GetReplicaList(k2);
+    auto r2 = service->GetReplicaList(k2, "default");
     ASSERT_TRUE(r2.has_value()) << "read itself still succeeds";
 
     auto heartbeat = service->PromotionObjectHeartbeat(seg.client_id);
@@ -850,7 +852,7 @@ TEST_F(PromotionOnHitTest, AllocStartResetsTaskDeadline) {
 
     // T=0 : admit. start_time = T=0.
     {
-        auto r = service->GetReplicaList("k_late");
+        auto r = service->GetReplicaList("k_late", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -930,7 +932,7 @@ TEST_F(PromotionOnHitTest, NotifySuccessDecrementsCounter) {
 
     // Admit task 1. promotion_in_flight_ goes from 0 -> 1.
     {
-        auto r = service->GetReplicaList("k_first");
+        auto r = service->GetReplicaList("k_first", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -953,7 +955,7 @@ TEST_F(PromotionOnHitTest, NotifySuccessDecrementsCounter) {
     // still saturated at 1 and TryPushPromotionQueue silently drops this
     // attempt.
     {
-        auto r = service->GetReplicaList("k_second");
+        auto r = service->GetReplicaList("k_second", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto pending = service->PromotionObjectHeartbeat(seg.client_id);
@@ -998,7 +1000,7 @@ TEST_F(PromotionOnHitTest, AllocStartRejectsReapedTask) {
 
     // Admit the task.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -1055,7 +1057,7 @@ TEST_F(PromotionOnHitTest, NotifyRejectsNonHolder) {
 
     // Admit + stage.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto alloc =
@@ -1078,7 +1080,7 @@ TEST_F(PromotionOnHitTest, NotifyRejectsNonHolder) {
     // GetReplicaList filters PROCESSING replicas, and pre-AllocStart
     // there are no COMPLETE replicas to read for a LOCAL_DISK-only key
     // (only the LOCAL_DISK descriptor itself).
-    auto r_check = service->GetReplicaList("k_cold");
+    auto r_check = service->GetReplicaList("k_cold", "default");
     ASSERT_TRUE(r_check.has_value());
     bool saw_complete_memory = false;
     for (const auto& d : r_check.value().replicas) {
@@ -1135,7 +1137,7 @@ TEST_F(PromotionOnHitTest, NotifyFailureReleasesStateImmediately) {
 
     // Admit + stage k_a. promotion_in_flight_ goes 0 -> 1.
     {
-        auto r = service->GetReplicaList("k_a");
+        auto r = service->GetReplicaList("k_a", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto alloc = service->PromotionAllocStart(seg.client_id, "k_a", 1024, {});
@@ -1170,7 +1172,7 @@ TEST_F(PromotionOnHitTest, NotifyFailureReleasesStateImmediately) {
     // succeed even though queue_limit=1. Without the failure-side
     // decrement the cap would stay saturated until reaper TTL.
     {
-        auto r = service->GetReplicaList("k_b");
+        auto r = service->GetReplicaList("k_b", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto heartbeat = service->PromotionObjectHeartbeat(seg.client_id);
@@ -1212,7 +1214,7 @@ TEST_F(PromotionOnHitTest, NotifyFailureRejectsNonHolder) {
                                        1024, holder.segment_name));
 
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto alloc =
@@ -1265,7 +1267,7 @@ TEST_F(PromotionOnHitTest, AllocStartRejectsNonHolder) {
     const size_t used_baseline = seg_baseline->first;
 
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -1322,7 +1324,7 @@ TEST_F(PromotionOnHitTest, AllocStartRejectsSizeMismatch) {
     const size_t used_baseline = seg_baseline->first;
 
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -1389,7 +1391,7 @@ TEST_F(PromotionOnHitTest, ClientExpiryClearsPromotionTask) {
 
     // Admit the promotion. promotion_in_flight_ goes 0 -> 1.
     {
-        auto r = service->GetReplicaList("k_cold");
+        auto r = service->GetReplicaList("k_cold", "default");
         ASSERT_TRUE(r.has_value());
     }
 
@@ -1417,7 +1419,7 @@ TEST_F(PromotionOnHitTest, ClientExpiryClearsPromotionTask) {
                                        "k_other", 1024,
                                        second_holder.segment_name));
     {
-        auto r = service->GetReplicaList("k_other");
+        auto r = service->GetReplicaList("k_other", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto pending_pre =
@@ -1450,7 +1452,7 @@ TEST_F(PromotionOnHitTest, ClientExpiryClearsPromotionTask) {
     // on the second holder; with queue_limit=1 this can only succeed if
     // the slot was freed.
     {
-        auto r = service->GetReplicaList("k_other");
+        auto r = service->GetReplicaList("k_other", "default");
         ASSERT_TRUE(r.has_value())
             << "GetReplicaList(k_other) failed with error=" << r.error();
     }
@@ -1529,7 +1531,7 @@ TEST_F(PromotionOnHitTest, RemoveErasesPromotionTask) {
 
     // Admit task 1.
     {
-        auto r = service->GetReplicaList("k_first");
+        auto r = service->GetReplicaList("k_first", "default");
         ASSERT_TRUE(r.has_value());
     }
     {
@@ -1541,7 +1543,7 @@ TEST_F(PromotionOnHitTest, RemoveErasesPromotionTask) {
     // Remove k_first with force=true. With the fix, this also wipes
     // k_first's promotion_tasks entry and decrements
     // promotion_in_flight_ back to 0.
-    auto rm = service->Remove("k_first", /*force=*/true);
+    auto rm = service->Remove("k_first", "default", /*force=*/true);
     ASSERT_TRUE(rm.has_value())
         << "Remove should succeed; error=" << rm.error();
 
@@ -1549,7 +1551,7 @@ TEST_F(PromotionOnHitTest, RemoveErasesPromotionTask) {
     // if the slot was freed by Remove. Without the in-flight cleanup,
     // it would stay pinned for the full 300s TTL.
     {
-        auto r = service->GetReplicaList("k_second");
+        auto r = service->GetReplicaList("k_second", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto pending_post = service->PromotionObjectHeartbeat(holder.client_id);
@@ -1586,12 +1588,12 @@ TEST_F(PromotionOnHitTest, RemoveByRegexErasesPromotionTask) {
 
     // Admit task on regex_k1.
     {
-        auto r = service->GetReplicaList("regex_k1");
+        auto r = service->GetReplicaList("regex_k1", "default");
         ASSERT_TRUE(r.has_value());
     }
 
     // RemoveByRegex matches regex_k1 only.
-    auto removed = service->RemoveByRegex("^regex_", /*force=*/true);
+    auto removed = service->RemoveByRegex("^regex_", "default", /*force=*/true);
     ASSERT_TRUE(removed.has_value())
         << "RemoveByRegex should succeed; error=" << removed.error();
     EXPECT_EQ(removed.value(), 1) << "exactly one key (regex_k1) should match";
@@ -1599,7 +1601,7 @@ TEST_F(PromotionOnHitTest, RemoveByRegexErasesPromotionTask) {
     // Slot must be free — admit on other_k2 (different shard or same,
     // doesn't matter because counter is global).
     {
-        auto r = service->GetReplicaList("other_k2");
+        auto r = service->GetReplicaList("other_k2", "default");
         ASSERT_TRUE(r.has_value());
     }
     auto pending_post = service->PromotionObjectHeartbeat(holder.client_id);

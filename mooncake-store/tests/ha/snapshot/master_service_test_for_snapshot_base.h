@@ -217,7 +217,7 @@ class MasterServiceSnapshotTestBase : public ::testing::Test {
         }
 
         for (const auto& key : state.all_keys) {
-            auto replica_result = service->GetReplicaList(key);
+            auto replica_result = service->GetReplicaList(key, "default");
             if (replica_result.has_value()) {
                 state.replica_lists[key] = std::move(replica_result.value());
             }
@@ -530,8 +530,8 @@ class MasterServiceSnapshotTestBase : public ::testing::Test {
         const std::string key = "snapshot_putstart_consistency_key";
         const uint64_t slice_length = 1024;
 
-        auto before = original->PutStart(client_id, key, slice_length, config);
-        auto after = restored->PutStart(client_id, key, slice_length, config);
+        auto before = original->PutStart(client_id, key, "default", slice_length, config);
+        auto after = restored->PutStart(client_id, key, "default", slice_length, config);
 
         ASSERT_EQ(before.has_value(), after.has_value())
             << "PutStart has_value mismatch between original and restored "
