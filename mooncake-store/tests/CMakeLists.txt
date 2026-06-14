@@ -58,6 +58,7 @@ add_store_test(master_admin_server_test master_admin_server_test.cpp)
 add_store_test(posix_file_test posix_file_test.cpp)
 add_store_test(thread_pool_test thread_pool_test.cpp)
 add_store_test(transfer_task_test transfer_task_test.cpp)
+add_store_test(tenant_qos_scheduler_test tenant_qos_scheduler_test.cpp)
 add_store_test(segment_test segment_test.cpp)
 add_store_test(offset_allocator_test offset_allocator_test.cpp)
 add_store_test(utils_test utils_test.cpp)
@@ -146,10 +147,11 @@ target_link_libraries(
          gtest_main
          pthread)
 if(STORE_USE_K8S_LEASE)
-  target_link_libraries(high_availability_test
-                        PRIVATE ${K8S_LEASE_WRAPPER_LIB})
+  target_link_libraries(high_availability_test PRIVATE ${K8S_LEASE_WRAPPER_LIB})
 endif()
-if(STORE_USE_ETCD OR STORE_USE_REDIS OR STORE_USE_K8S_LEASE)
+if(STORE_USE_ETCD
+   OR STORE_USE_REDIS
+   OR STORE_USE_K8S_LEASE)
   add_test(NAME high_availability_test COMMAND high_availability_test)
 endif()
 add_ha_test(ha_backend_availability_test
@@ -165,6 +167,20 @@ target_link_libraries(
          mooncake_common
          glog
          gflags
+         pthread)
+
+add_executable(qos_baseline_benchmark qos_baseline_benchmark.cpp)
+target_include_directories(qos_baseline_benchmark
+                           PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(
+  qos_baseline_benchmark
+  PUBLIC mooncake_store
+         transfer_engine
+         cachelib_memory_allocator
+         ${ETCD_WRAPPER_LIB}
+         glog
+         gflags
+         ibverbs
          pthread)
 
 # HA tests
