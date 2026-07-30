@@ -28,7 +28,8 @@ MasterService::UpsertTenantQuotaPolicy(const TenantId& tenant_id,
     if (!enable_multi_tenants_) {
         return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
     }
-    if (requested_quota_bytes == 0) {
+    if (requested_quota_bytes == 0 ||
+        requested_quota_bytes > TenantQuotaAccount::kMaxChargedBytes) {
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
@@ -85,13 +86,7 @@ MasterService::DeleteTenantQuotaPolicy(const TenantId& tenant_id) {
                                        : ErrorCode::OBJECT_NOT_FOUND);
     }
 
-    auto post_mark_snapshot = GetTenantQuotaSnapshot(tenant_id);
-    if (TenantHasObjects(tenant_id) ||
-        (post_mark_snapshot.has_value() &&
-         (post_mark_snapshot->used_bytes != 0 ||
-          post_mark_snapshot->reserved_bytes != 0 ||
-          post_mark_snapshot->committed_count != 0 ||
-          post_mark_snapshot->metadata_object_count != 0))) {
+    if (TenantHasObjects(tenant_id)) {
         restore_policy();
         return tl::make_unexpected(ErrorCode::TENANT_NOT_EMPTY);
     }
@@ -172,7 +167,7 @@ void MasterService::ApplyTenantQuotaPolicies(
     auto result = tenant_quota_table_.ApplyTenantPolicies(policies, capacity);
     if (!result) {
         throw std::invalid_argument(
-            "tenant quota policy contains an invalid quota");
+            "tenant quota policy exceeds atomic accounting range");
     }
 }
 
@@ -191,6 +186,29 @@ void MasterService::LoadTenantQuotaPoliciesFromStoreOrThrow() {
                                  snapshot.error());
     }
     ApplyTenantQuotaPolicies(snapshot.value());
+}
+
+uint64_t MasterService::CompletedMemoryQuotaCharge(
+    const ObjectMetadata& metadata) const {
+    const auto completed_replicas =
+        metadata.CountReplicas([](const Replica& replica) {
+            return replica.is_memory_replica() && replica.is_completed();
+        });
+    const unsigned __int128 charge =
+        static_cast<unsigned __int128>(metadata.size) * completed_replicas;
+    return charge > std::numeric_limits<uint64_t>::max()
+               ? std::numeric_limits<uint64_t>::max()
+               : static_cast<uint64_t>(charge);
+}
+
+uint64_t MasterService::RequestedMemoryQuotaCharge(
+    uint64_t value_length, const ReplicateConfig& config) const {
+    const unsigned __int128 charge =
+        static_cast<unsigned __int128>(value_length) * config.replica_num;
+    if (charge > std::numeric_limits<uint64_t>::max()) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return static_cast<uint64_t>(charge);
 }
 
 uint64_t MasterService::GetTenantQuotaAllocatableCapacityBytes() {
@@ -218,6 +236,69 @@ void MasterService::RecomputeTenantEffectiveQuotas() {
     tenant_quota_table_.RecomputeEffectiveQuotas(capacity);
 }
 
+MasterService::TenantState& MasterService::GetOrCreateTenantState(
+    MetadataShard& shard, const TenantId& tenant_id) {
+    auto it = shard.tenants.try_emplace(tenant_id).first;
+    if (enable_multi_tenants_ && it->second.quota_account == nullptr) {
+        it->second.quota_account =
+            tenant_quota_table_.GetOrCreateTenantHandle(tenant_id);
+    }
+    return it->second;
+}
+
+TenantQuotaHandle MasterService::GetBoundTenantQuotaHandle(
+    const TenantState& tenant_state) const {
+    if (!enable_multi_tenants_) {
+        return nullptr;
+    }
+    assert(tenant_state.quota_account != nullptr);
+    return tenant_state.quota_account;
+}
+
+tl::expected<void, ErrorCode> MasterService::ChargeTenantQuota(
+    TenantQuotaHandle account, uint64_t bytes, uint64_t* deficit_bytes) {
+    if (!enable_multi_tenants_) {
+        return {};
+    }
+    if (account == nullptr) {
+        LOG(ERROR) << "tenant quota charge attempted without a bound handle";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+    auto result = account->TryCharge(bytes);
+    if (result) {
+        if (deficit_bytes != nullptr) {
+            *deficit_bytes = 0;
+        }
+        return {};
+    }
+    if (deficit_bytes != nullptr) {
+        *deficit_bytes = result.error().deficit_bytes;
+    }
+    return tl::make_unexpected(
+        result.error().error == TenantQuotaError::kTenantNotRegistered
+            ? ErrorCode::TENANT_NOT_REGISTERED
+        : result.error().error == TenantQuotaError::kQuotaExceeded
+            ? ErrorCode::TENANT_QUOTA_EXCEEDED
+        : result.error().error == TenantQuotaError::kInvalidArgument
+            ? ErrorCode::INVALID_PARAMS
+            : ErrorCode::INTERNAL_ERROR);
+}
+
+void MasterService::ReleaseTenantQuota(TenantQuotaHandle account,
+                                       uint64_t bytes) {
+    if (!enable_multi_tenants_ || bytes == 0) {
+        return;
+    }
+    if (account == nullptr) {
+        LOG(ERROR) << "tenant quota release attempted without a bound handle"
+                   << ", bytes=" << bytes;
+        return;
+    }
+    if (!account->Release(bytes)) {
+        LOG(ERROR) << "tenant quota release mismatch bytes=" << bytes;
+    }
+}
+
 void MasterService::RebuildTenantQuotaUsageFromMetadata() {
     if (!enable_multi_tenants_) {
         return;
@@ -229,28 +310,32 @@ void MasterService::RebuildTenantQuotaUsageFromMetadata() {
         for (const auto& [tenant_id, tenant_state] : shard->tenants) {
             for (const auto& [_, metadata] : tenant_state.metadata) {
                 auto& tenant_usage = usage[tenant_id];
-                if (tenant_usage.metadata_object_count ==
-                    std::numeric_limits<uint64_t>::max()) {
-                    throw std::overflow_error(
-                        "tenant metadata object count overflow during rebuild");
-                }
-                ++tenant_usage.metadata_object_count;
                 const uint64_t charge = CompletedMemoryQuotaCharge(metadata);
-                if (charge == 0) {
-                    continue;
-                }
-                if (tenant_usage.used_bytes >
-                    std::numeric_limits<uint64_t>::max() - charge) {
+                if (charge > TenantQuotaAccount::kMaxChargedBytes ||
+                    tenant_usage.charged_bytes >
+                        TenantQuotaAccount::kMaxChargedBytes - charge) {
                     throw std::overflow_error(
-                        "tenant quota usage overflow during rebuild");
+                        "rebuilt tenant quota exceeds 2^63 - 1 bytes");
                 }
-                tenant_usage.used_bytes += charge;
-                if (tenant_usage.committed_count ==
-                    std::numeric_limits<uint64_t>::max()) {
-                    throw std::overflow_error(
-                        "tenant committed count overflow during rebuild");
+                tenant_usage.charged_bytes += charge;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < kNumShards; ++i) {
+        MetadataShardAccessorRW shard(this, i);
+        for (auto& [tenant_id, tenant_state] : shard->tenants) {
+            tenant_state.quota_account =
+                tenant_quota_table_.GetOrCreateTenantHandle(tenant_id);
+            for (auto& [key, metadata] : tenant_state.metadata) {
+                auto rebuild_result = metadata.quota_ledger.Rebuild(
+                    tenant_state.quota_account,
+                    CompletedMemoryQuotaCharge(metadata));
+                if (!rebuild_result) {
+                    throw std::runtime_error(
+                        "failed to rebuild object tenant quota ledger for " +
+                        tenant_id.value() + "/" + key);
                 }
-                ++tenant_usage.committed_count;
             }
         }
     }
@@ -263,27 +348,11 @@ void MasterService::RebuildTenantQuotaUsageFromMetadata() {
                    "creating orphan quota state";
         }
     }
-
-    {
-        std::lock_guard<std::mutex> recompute_lock(
-            tenant_quota_recompute_mutex_);
-        const uint64_t capacity = GetTenantQuotaAllocatableCapacityBytes();
-        auto rebuild_result = tenant_quota_table_.RebuildUsage(usage, capacity);
-        if (!rebuild_result) {
-            throw std::runtime_error("failed to rebuild tenant quota usage");
-        }
-    }
-
-    for (size_t i = 0; i < kNumShards; ++i) {
-        MetadataShardAccessorRW shard(this, i);
-        for (auto& [_, tenant_state] : shard->tenants) {
-            for (auto& [_, metadata] : tenant_state.metadata) {
-                metadata.reserved_quota_charge_bytes = 0;
-                metadata.committed_quota_charge_bytes =
-                    CompletedMemoryQuotaCharge(metadata);
-                metadata.pending_replaced_quota_charge_bytes = 0;
-            }
-        }
+    std::lock_guard<std::mutex> recompute_lock(tenant_quota_recompute_mutex_);
+    const uint64_t capacity = GetTenantQuotaAllocatableCapacityBytes();
+    auto rebuild_result = tenant_quota_table_.RebuildUsage(usage, capacity);
+    if (!rebuild_result) {
+        throw std::runtime_error("failed to rebuild tenant quota usage");
     }
 }
 

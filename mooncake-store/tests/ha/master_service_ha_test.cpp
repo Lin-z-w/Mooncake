@@ -430,7 +430,8 @@ class MasterServiceHATest : public ::testing::Test {
         const size_t shard_idx = service->getMetadataShardIndex(tenant, key);
         auto shard_access =
             MasterService::MetadataShardAccessorRW(service, shard_idx);
-        auto& tenant_state = shard_access->tenants[tenant];
+        auto& tenant_state =
+            service->GetOrCreateTenantState(shard_access.get(), tenant);
         tenant_state.promotion_tasks.emplace(
             key, MasterService::PromotionTask{
                      .source_id = 0,
@@ -576,8 +577,7 @@ class MasterServiceHATest : public ::testing::Test {
     static void FinalizeRemovedReplicasForTesting(
         MasterService& service, const OpLogEntry& durable_entry,
         const std::vector<ReplicaID>& replica_ids) {
-        service.FinalizeRemovedReplicasAfterDurable(
-            durable_entry, replica_ids, MasterService::QuotaEraseMode::kFull);
+        service.FinalizeRemovedReplicasAfterDurable(durable_entry, replica_ids);
     }
 
     static void SetLocalDiskUsedBytesForTesting(MasterService& service,

@@ -28,22 +28,14 @@ class ShardedTenantQuotaTable {
     void RecomputeEffectiveQuotas(uint64_t allocatable_capacity_bytes);
 
     bool IsTenantRegistered(const TenantId& tenant_id) const;
+    // May create a stable closed tombstone for a previously unseen tenant.
+    TenantQuotaHandle GetOrCreateTenantHandle(const TenantId& tenant_id);
     std::optional<TenantQuotaSnapshot> GetTenantSnapshot(
         const TenantId& tenant_id) const;
     std::vector<TenantQuotaSnapshot> ListTenantSnapshots() const;
-    uint64_t ComputeDeficit(const TenantId& tenant_id,
-                            uint64_t incoming_bytes) const;
 
-    TenantQuotaResult Reserve(const TenantId& tenant_id, uint64_t bytes);
-    TenantQuotaResult Commit(const TenantId& tenant_id, uint64_t bytes);
-    TenantQuotaResult CommitAdditional(const TenantId& tenant_id,
-                                       uint64_t bytes);
-    TenantQuotaResult Abort(const TenantId& tenant_id, uint64_t bytes);
-    TenantQuotaResult Release(const TenantId& tenant_id, uint64_t bytes);
-    TenantQuotaResult ReleasePartial(const TenantId& tenant_id, uint64_t bytes);
-
-    void IncrementMetadataObjectCount(const TenantId& tenant_id);
-    TenantQuotaResult DecrementMetadataObjectCount(const TenantId& tenant_id);
+    // Rebuild overwrites runtime accounting and must only run while data-plane
+    // charge/release operations are quiescent.
     TenantQuotaResult RebuildUsage(const TenantQuotaUsageMap& usage,
                                    uint64_t allocatable_capacity_bytes);
 

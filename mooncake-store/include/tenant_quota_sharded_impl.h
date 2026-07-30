@@ -37,9 +37,11 @@ ShardedTenantQuotaTable<NumShards>::DisableTenantPolicyIfEmpty(
 template <size_t NumShards>
 TenantQuotaResult ShardedTenantQuotaTable<NumShards>::ApplyTenantPolicies(
     const TenantQuotaPolicyMap& policies, uint64_t allocatable_capacity_bytes) {
-    auto validation_result = TenantQuotaShard::ValidatePolicies(policies);
-    if (!validation_result) {
-        return validation_result;
+    for (const auto& [_, requested_quota_bytes] : policies) {
+        if (requested_quota_bytes == 0 ||
+            requested_quota_bytes > TenantQuotaAccount::kMaxChargedBytes) {
+            return tl::make_unexpected(TenantQuotaError::kInvalidArgument);
+        }
     }
 
     std::lock_guard<std::mutex> recompute_lock(recompute_mutex_);
@@ -89,6 +91,14 @@ bool ShardedTenantQuotaTable<NumShards>::IsTenantRegistered(
 }
 
 template <size_t NumShards>
+TenantQuotaHandle ShardedTenantQuotaTable<NumShards>::GetOrCreateTenantHandle(
+    const TenantId& tenant_id) {
+    auto& shard = GetShard(tenant_id);
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    return shard.table.GetOrCreateTenantHandle(tenant_id);
+}
+
+template <size_t NumShards>
 std::optional<TenantQuotaSnapshot>
 ShardedTenantQuotaTable<NumShards>::GetTenantSnapshot(
     const TenantId& tenant_id) const {
@@ -115,84 +125,12 @@ ShardedTenantQuotaTable<NumShards>::ListTenantSnapshots() const {
 }
 
 template <size_t NumShards>
-uint64_t ShardedTenantQuotaTable<NumShards>::ComputeDeficit(
-    const TenantId& tenant_id, uint64_t incoming_bytes) const {
-    const auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.ComputeDeficit(tenant_id, incoming_bytes);
-}
-
-template <size_t NumShards>
-TenantQuotaResult ShardedTenantQuotaTable<NumShards>::Reserve(
-    const TenantId& tenant_id, uint64_t bytes) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.Reserve(tenant_id, bytes);
-}
-
-template <size_t NumShards>
-TenantQuotaResult ShardedTenantQuotaTable<NumShards>::Commit(
-    const TenantId& tenant_id, uint64_t bytes) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.Commit(tenant_id, bytes);
-}
-
-template <size_t NumShards>
-TenantQuotaResult ShardedTenantQuotaTable<NumShards>::CommitAdditional(
-    const TenantId& tenant_id, uint64_t bytes) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.CommitAdditional(tenant_id, bytes);
-}
-
-template <size_t NumShards>
-TenantQuotaResult ShardedTenantQuotaTable<NumShards>::Abort(
-    const TenantId& tenant_id, uint64_t bytes) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.Abort(tenant_id, bytes);
-}
-
-template <size_t NumShards>
-TenantQuotaResult ShardedTenantQuotaTable<NumShards>::Release(
-    const TenantId& tenant_id, uint64_t bytes) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.Release(tenant_id, bytes);
-}
-
-template <size_t NumShards>
-TenantQuotaResult ShardedTenantQuotaTable<NumShards>::ReleasePartial(
-    const TenantId& tenant_id, uint64_t bytes) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.ReleasePartial(tenant_id, bytes);
-}
-
-template <size_t NumShards>
-void ShardedTenantQuotaTable<NumShards>::IncrementMetadataObjectCount(
-    const TenantId& tenant_id) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    shard.table.IncrementMetadataObjectCount(tenant_id);
-}
-
-template <size_t NumShards>
-TenantQuotaResult
-ShardedTenantQuotaTable<NumShards>::DecrementMetadataObjectCount(
-    const TenantId& tenant_id) {
-    auto& shard = GetShard(tenant_id);
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.table.DecrementMetadataObjectCount(tenant_id);
-}
-
-template <size_t NumShards>
 TenantQuotaResult ShardedTenantQuotaTable<NumShards>::RebuildUsage(
     const TenantQuotaUsageMap& usage, uint64_t allocatable_capacity_bytes) {
-    auto validation_result = TenantQuotaShard::ValidateUsage(usage);
-    if (!validation_result) {
-        return validation_result;
+    for (const auto& [_, tenant_usage] : usage) {
+        if (tenant_usage.charged_bytes > TenantQuotaAccount::kMaxChargedBytes) {
+            return tl::make_unexpected(TenantQuotaError::kInvalidArgument);
+        }
     }
 
     std::lock_guard<std::mutex> recompute_lock(recompute_mutex_);

@@ -105,9 +105,10 @@ void MakeOrphanTenant(TenantQuotaShard* table, const std::string& tenant_id,
     const TenantId canonical_tenant(tenant_id);
     ASSERT_TRUE(table->UpsertTenantPolicy(canonical_tenant, bytes).has_value());
     table->RecomputeEffectiveQuotas(bytes);
-    ASSERT_TRUE(table->Reserve(canonical_tenant, bytes).has_value());
-    ASSERT_TRUE(table->Commit(canonical_tenant, bytes).has_value());
-    ASSERT_TRUE(table->ApplyTenantPolicies({}).has_value());
+    ASSERT_TRUE(table->GetOrCreateTenantHandle(canonical_tenant)
+                    ->TryCharge(bytes)
+                    .has_value());
+    ASSERT_TRUE(table->ApplyTenantPolicies({}));
 }
 
 TEST(TenantQuotaShardTest, NormalizesEmptyExplicitTenantIdToDefault) {
@@ -137,20 +138,21 @@ TEST(TenantQuotaShardTest, RejectsZeroExplicitQuotaWithoutChangingState) {
     EXPECT_EQ(snapshot.requested_quota_bytes, 100);
 }
 
-TEST(TenantQuotaShardTest,
-     ApplyPoliciesRejectsInvalidInputWithoutChangingState) {
+TEST(TenantQuotaShardTest, RejectsPolicyAboveAtomicAccountingRange) {
     TenantQuotaShard table;
-    const TenantId tenant_a("tenant-a");
-    const TenantId tenant_b("tenant-b");
-    ASSERT_TRUE(table.UpsertTenantPolicy(tenant_a, 100).has_value());
+    const TenantId tenant_id("tenant-a");
+    ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, 100));
 
-    auto result = table.ApplyTenantPolicies({{tenant_a, 200}, {tenant_b, 0}});
+    auto upsert = table.UpsertTenantPolicy(
+        tenant_id, TenantQuotaAccount::kMaxChargedBytes + 1);
+    auto replace = table.ApplyTenantPolicies(
+        {{tenant_id, TenantQuotaAccount::kMaxChargedBytes + 1}});
 
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), TenantQuotaError::kInvalidArgument);
-    EXPECT_EQ(table.GetTenantPolicies(),
-              (TenantQuotaPolicyMap{{tenant_a, 100}}));
-    EXPECT_FALSE(table.GetTenantSnapshot(tenant_b).has_value());
+    ASSERT_FALSE(upsert);
+    EXPECT_EQ(upsert.error(), TenantQuotaError::kInvalidArgument);
+    ASSERT_FALSE(replace);
+    EXPECT_EQ(replace.error(), TenantQuotaError::kInvalidArgument);
+    EXPECT_EQ(Snapshot(table, "tenant-a").requested_quota_bytes, 100);
 }
 
 TEST(TenantQuotaShardTest, ApplyPoliciesCreatesOrphanState) {
@@ -162,9 +164,22 @@ TEST(TenantQuotaShardTest, ApplyPoliciesCreatesOrphanState) {
     EXPECT_FALSE(snapshot.has_explicit_policy);
     EXPECT_EQ(snapshot.requested_quota_bytes, 0);
     EXPECT_EQ(snapshot.effective_quota_bytes, 0);
-    EXPECT_EQ(snapshot.used_bytes, 40);
-    EXPECT_EQ(snapshot.committed_count, 1);
+    EXPECT_EQ(snapshot.charged_bytes, 40);
+    EXPECT_TRUE(snapshot.admission_closed);
     EXPECT_TRUE(snapshot.over_quota);
+}
+
+TEST(TenantQuotaShardTest, ClosedOrphanAccountCanDrain) {
+    TenantQuotaShard table;
+    const TenantId tenant_id("tenant-a");
+    MakeOrphanTenant(&table, tenant_id.value(), 40);
+    auto* handle = table.GetOrCreateTenantHandle(tenant_id);
+
+    ASSERT_TRUE(handle->Release(40));
+
+    EXPECT_EQ(handle->ChargedBytes(), 0);
+    EXPECT_TRUE(handle->AdmissionClosed());
+    EXPECT_FALSE(table.GetTenantSnapshot(tenant_id).has_value());
 }
 
 TEST(TenantQuotaShardTest, ApplyPoliciesReplacesCanonicalPolicySet) {
@@ -172,12 +187,11 @@ TEST(TenantQuotaShardTest, ApplyPoliciesReplacesCanonicalPolicySet) {
     const TenantId tenant_a("tenant-a");
     const TenantId tenant_b("tenant-b");
     const TenantId tenant_c("tenant-c");
-    ASSERT_TRUE(table.ApplyTenantPolicies({{tenant_a, 100}, {tenant_b, 200}})
-                    .has_value());
-    table.IncrementMetadataObjectCount(tenant_a);
+    table.ApplyTenantPolicies({{tenant_a, 100}, {tenant_b, 200}});
+    table.RecomputeEffectiveQuotas(300);
+    ASSERT_TRUE(table.GetOrCreateTenantHandle(tenant_a)->TryCharge(1));
 
-    ASSERT_TRUE(table.ApplyTenantPolicies({{tenant_b, 300}, {tenant_c, 400}})
-                    .has_value());
+    table.ApplyTenantPolicies({{tenant_b, 300}, {tenant_c, 400}});
 
     EXPECT_FALSE(table.IsTenantRegistered(tenant_a));
     EXPECT_TRUE(table.IsTenantRegistered(tenant_b));
@@ -207,9 +221,11 @@ TEST(TenantQuotaShardTest, PolicyMutationDoesNotRecomputeEffectiveQuota) {
 
     ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, 200).has_value());
     EXPECT_EQ(Snapshot(table, "tenant-a").effective_quota_bytes, 100);
+    EXPECT_TRUE(Snapshot(table, "tenant-a").admission_closed);
 
     table.RecomputeEffectiveQuotas(1000);
     EXPECT_EQ(Snapshot(table, "tenant-a").effective_quota_bytes, 200);
+    EXPECT_FALSE(Snapshot(table, "tenant-a").admission_closed);
 }
 
 TEST(TenantQuotaShardTest, ListSnapshotsSortedAndCleansLazyEmptyTenants) {
@@ -272,34 +288,32 @@ TEST(TenantQuotaShardTest, LazyEmptyOrphansDoNotAppearInList) {
     EXPECT_EQ(snapshots[0].tenant_id, TenantId("team-a"));
 }
 
-TEST(TenantQuotaShardTest, ReserveRequiresRegisteredTenantIncludingZeroBytes) {
+TEST(TenantQuotaShardTest, ChargeRequiresRegisteredTenantIncludingZeroBytes) {
     TenantQuotaShard table;
+    auto* account = table.GetOrCreateTenantHandle(TenantId("missing"));
 
-    auto regular = table.Reserve(TenantId("missing"), 1);
-    auto zero = table.Reserve(TenantId("missing"), 0);
+    auto regular = account->TryCharge(1);
+    auto zero = account->TryCharge(0);
 
     ASSERT_FALSE(regular.has_value());
     ASSERT_FALSE(zero.has_value());
-    EXPECT_EQ(regular.error(), TenantQuotaError::kTenantNotRegistered);
-    EXPECT_EQ(zero.error(), TenantQuotaError::kTenantNotRegistered);
+    EXPECT_EQ(regular.error().error, TenantQuotaError::kTenantNotRegistered);
+    EXPECT_EQ(zero.error().error, TenantQuotaError::kTenantNotRegistered);
 }
 
-TEST(TenantQuotaShardTest, TracksAdditionalCommitAndMetadataCount) {
+TEST(TenantQuotaShardTest, ChargeAndReleaseUpdateSingleCounter) {
     TenantQuotaShard table;
     const TenantId tenant_id("tenant-a");
     ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, 300).has_value());
     table.RecomputeEffectiveQuotas(300);
+    auto* account = table.GetOrCreateTenantHandle(tenant_id);
 
-    ASSERT_TRUE(table.Reserve(tenant_id, 200).has_value());
-    ASSERT_TRUE(table.Commit(tenant_id, 100).has_value());
-    ASSERT_TRUE(table.CommitAdditional(tenant_id, 100).has_value());
-    table.IncrementMetadataObjectCount(tenant_id);
+    ASSERT_TRUE(account->TryCharge(200).has_value());
+    ASSERT_TRUE(account->Release(50).has_value());
 
     auto snapshot = Snapshot(table, "tenant-a");
-    EXPECT_EQ(snapshot.used_bytes, 200);
-    EXPECT_EQ(snapshot.reserved_bytes, 0);
-    EXPECT_EQ(snapshot.committed_count, 1);
-    EXPECT_EQ(snapshot.metadata_object_count, 1);
+    EXPECT_EQ(snapshot.charged_bytes, 150);
+    EXPECT_FALSE(snapshot.admission_closed);
 }
 
 TEST(TenantQuotaShardTest, AccountingMismatchDoesNotMutateState) {
@@ -307,28 +321,13 @@ TEST(TenantQuotaShardTest, AccountingMismatchDoesNotMutateState) {
     const TenantId tenant_id("tenant-a");
     ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, 100).has_value());
     table.RecomputeEffectiveQuotas(100);
-    ASSERT_TRUE(table.Reserve(tenant_id, 10).has_value());
+    auto* account = table.GetOrCreateTenantHandle(tenant_id);
+    ASSERT_TRUE(account->TryCharge(10).has_value());
 
-    auto commit = table.Commit(tenant_id, 11);
-    auto abort = table.Abort(tenant_id, 11);
-    auto before_commit = Snapshot(table, "tenant-a");
-    ASSERT_FALSE(commit.has_value());
-    ASSERT_FALSE(abort.has_value());
-    EXPECT_EQ(commit.error(), TenantQuotaError::kAccountingMismatch);
-    EXPECT_EQ(abort.error(), TenantQuotaError::kAccountingMismatch);
-    EXPECT_EQ(before_commit.used_bytes, 0);
-    EXPECT_EQ(before_commit.reserved_bytes, 10);
-
-    ASSERT_TRUE(table.Commit(tenant_id, 10).has_value());
-    auto release = table.Release(tenant_id, 11);
-    auto partial = table.ReleasePartial(tenant_id, 11);
+    auto release = account->Release(11);
     ASSERT_FALSE(release.has_value());
-    ASSERT_FALSE(partial.has_value());
     EXPECT_EQ(release.error(), TenantQuotaError::kAccountingMismatch);
-    EXPECT_EQ(partial.error(), TenantQuotaError::kAccountingMismatch);
-    auto after_commit = Snapshot(table, "tenant-a");
-    EXPECT_EQ(after_commit.used_bytes, 10);
-    EXPECT_EQ(after_commit.committed_count, 1);
+    EXPECT_EQ(Snapshot(table, "tenant-a").charged_bytes, 10);
 }
 
 TEST(TenantQuotaShardTest, DisablePolicyRejectsNonEmptyTenant) {
@@ -336,13 +335,36 @@ TEST(TenantQuotaShardTest, DisablePolicyRejectsNonEmptyTenant) {
     const TenantId tenant_id("tenant-a");
     ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, 100).has_value());
     table.RecomputeEffectiveQuotas(100);
-    ASSERT_TRUE(table.Reserve(tenant_id, 1).has_value());
+    ASSERT_TRUE(
+        table.GetOrCreateTenantHandle(tenant_id)->TryCharge(1).has_value());
 
     auto result = table.DisableTenantPolicyIfEmpty(tenant_id);
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), TenantQuotaError::kTenantNotEmpty);
     EXPECT_TRUE(table.IsTenantRegistered(tenant_id));
+    EXPECT_FALSE(Snapshot(table, "tenant-a").admission_closed);
+    EXPECT_TRUE(table.GetOrCreateTenantHandle(tenant_id)->TryCharge(1));
+}
+
+TEST(TenantQuotaShardTest, HandleRemainsStableAcrossPolicyLifecycle) {
+    TenantQuotaShard table;
+    const TenantId tenant_id("tenant-a");
+    ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, 100));
+    table.RecomputeEffectiveQuotas(100);
+    auto* handle = table.GetOrCreateTenantHandle(tenant_id);
+
+    ASSERT_TRUE(handle->TryCharge(10));
+    ASSERT_TRUE(handle->Release(10));
+    ASSERT_TRUE(table.DisableTenantPolicyIfEmpty(tenant_id));
+    EXPECT_FALSE(handle->TryCharge(0));
+    EXPECT_FALSE(table.GetTenantSnapshot(tenant_id).has_value());
+
+    ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, 200));
+    table.RecomputeEffectiveQuotas(200);
+    EXPECT_EQ(table.GetOrCreateTenantHandle(tenant_id), handle);
+    EXPECT_TRUE(handle->TryCharge(200));
+    EXPECT_EQ(Snapshot(table, "tenant-a").charged_bytes, 200);
 }
 
 TEST(TenantQuotaShardTest, RebuildUsageCreatesAndRemovesOrphans) {
@@ -352,90 +374,52 @@ TEST(TenantQuotaShardTest, RebuildUsageCreatesAndRemovesOrphans) {
     ASSERT_TRUE(table.UpsertTenantPolicy(explicit_tenant, 100).has_value());
 
     TenantQuotaUsageMap usage{
-        {explicit_tenant,
-         {.used_bytes = 40, .committed_count = 1, .metadata_object_count = 1}},
-        {orphan,
-         {.used_bytes = 20, .committed_count = 1, .metadata_object_count = 1}},
+        {explicit_tenant, {.charged_bytes = 40}},
+        {orphan, {.charged_bytes = 20}},
     };
-    ASSERT_TRUE(table.RebuildUsage(usage).has_value());
+    ASSERT_TRUE(table.RebuildUsage(usage));
     table.RecomputeEffectiveQuotas(100);
 
     EXPECT_TRUE(Snapshot(table, "tenant-a").has_explicit_policy);
     EXPECT_FALSE(Snapshot(table, "orphan").has_explicit_policy);
     EXPECT_TRUE(Snapshot(table, "orphan").over_quota);
 
-    ASSERT_TRUE(table.RebuildUsage({}).has_value());
+    ASSERT_TRUE(table.RebuildUsage({}));
     EXPECT_FALSE(table.GetTenantSnapshot(orphan).has_value());
     EXPECT_TRUE(table.GetTenantSnapshot(explicit_tenant).has_value());
-}
-
-TEST(TenantQuotaShardTest,
-     RebuildUsageRejectsInvalidInputWithoutChangingState) {
-    TenantQuotaShard table;
-    const TenantId tenant_a("tenant-a");
-    const TenantId tenant_b("tenant-b");
-    ASSERT_TRUE(table.UpsertTenantPolicy(tenant_a, 100).has_value());
-    ASSERT_TRUE(table
-                    .RebuildUsage({{tenant_a,
-                                    {.used_bytes = 10,
-                                     .committed_count = 1,
-                                     .metadata_object_count = 1}}})
-                    .has_value());
-
-    auto result = table.RebuildUsage(
-        {{tenant_a,
-          {.used_bytes = 20, .committed_count = 1, .metadata_object_count = 1}},
-         {tenant_b,
-          {.used_bytes = 10,
-           .committed_count = 0,
-           .metadata_object_count = 1}}});
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), TenantQuotaError::kInvalidArgument);
-    EXPECT_EQ(Snapshot(table, tenant_a.value()).used_bytes, 10);
-    EXPECT_FALSE(table.GetTenantSnapshot(tenant_b).has_value());
 }
 
 TEST(TenantQuotaShardTest, OverflowChecksDoNotWrapAccounting) {
     TenantQuotaShard table;
     const TenantId tenant_id("tenant-a");
-    const uint64_t max = std::numeric_limits<uint64_t>::max();
+    const uint64_t max = TenantQuotaAccount::kMaxChargedBytes;
     ASSERT_TRUE(table.UpsertTenantPolicy(tenant_id, max).has_value());
-    ASSERT_TRUE(table
-                    .RebuildUsage({{tenant_id,
-                                    {.used_bytes = max - 5,
-                                     .committed_count = max,
-                                     .metadata_object_count = max}}})
-                    .has_value());
+    ASSERT_TRUE(table.RebuildUsage({{tenant_id, {.charged_bytes = max - 5}}}));
     table.RecomputeEffectiveQuotas(max);
 
-    EXPECT_EQ(table.ComputeDeficit(tenant_id, 10), 5);
-    auto overflow_reserve = table.Reserve(tenant_id, 10);
-    ASSERT_FALSE(overflow_reserve.has_value());
-    EXPECT_EQ(overflow_reserve.error(), TenantQuotaError::kQuotaExceeded);
+    auto* account = table.GetOrCreateTenantHandle(tenant_id);
+    auto overflow_charge = account->TryCharge(10);
+    ASSERT_FALSE(overflow_charge.has_value());
+    EXPECT_EQ(overflow_charge.error().error, TenantQuotaError::kQuotaExceeded);
+    EXPECT_EQ(overflow_charge.error().deficit_bytes, 5);
 
-    ASSERT_TRUE(table.Reserve(tenant_id, 5).has_value());
-    ASSERT_TRUE(table.Commit(tenant_id, 5).has_value());
-    table.IncrementMetadataObjectCount(tenant_id);
+    ASSERT_TRUE(account->TryCharge(5).has_value());
 
     auto snapshot = Snapshot(table, "tenant-a");
-    EXPECT_EQ(snapshot.used_bytes, max);
-    EXPECT_EQ(snapshot.reserved_bytes, 0);
-    EXPECT_EQ(snapshot.committed_count, max);
-    EXPECT_EQ(snapshot.metadata_object_count, max);
+    EXPECT_EQ(snapshot.charged_bytes, max);
 }
 
-TEST(ShardedTenantQuotaTableTest, ConcurrentReserveNeverExceedsQuota) {
+TEST(ShardedTenantQuotaTableTest, ConcurrentChargeNeverExceedsQuota) {
     ShardedTenantQuotaTable<8> table;
     const TenantId tenant_id("tenant-a");
-    ASSERT_TRUE(
-        table.ApplyTenantPolicies({{tenant_id, 1000}}, 1000).has_value());
+    table.ApplyTenantPolicies({{tenant_id, 1000}}, 1000);
+    auto* account = table.GetOrCreateTenantHandle(tenant_id);
 
     std::atomic<int> successes = 0;
     std::vector<std::thread> workers;
     for (int i = 0; i < 20; ++i) {
         workers.emplace_back([&] {
-            if (table.Reserve(tenant_id, 100).has_value()) {
+            if (account->TryCharge(100).has_value()) {
                 ++successes;
             }
         });
@@ -445,7 +429,7 @@ TEST(ShardedTenantQuotaTableTest, ConcurrentReserveNeverExceedsQuota) {
     }
 
     EXPECT_EQ(successes.load(), 10);
-    EXPECT_EQ(Snapshot(table, "tenant-a").reserved_bytes, 1000);
+    EXPECT_EQ(Snapshot(table, "tenant-a").charged_bytes, 1000);
 }
 
 TEST(ShardedTenantQuotaTableTest, DifferentShardsUpdateIndependently) {
@@ -459,30 +443,30 @@ TEST(ShardedTenantQuotaTableTest, DifferentShardsUpdateIndependently) {
     }
 
     TestTable table;
-    ASSERT_TRUE(
-        table.ApplyTenantPolicies({{tenant_a, 1000}, {tenant_b, 1000}}, 2000)
-            .has_value());
+    table.ApplyTenantPolicies({{tenant_a, 1000}, {tenant_b, 1000}}, 2000);
+    auto* account_a = table.GetOrCreateTenantHandle(tenant_a);
+    auto* account_b = table.GetOrCreateTenantHandle(tenant_b);
 
     std::atomic<int> failures = 0;
-    auto update = [&](const TenantId& tenant_id) {
+    auto update = [&](TenantQuotaHandle account) {
         for (int i = 0; i < 1000; ++i) {
-            if (!table.Reserve(tenant_id, 1) || !table.Abort(tenant_id, 1)) {
+            if (!account->TryCharge(1) || !account->Release(1)) {
                 ++failures;
             }
         }
     };
-    std::thread first(update, std::cref(tenant_a));
-    std::thread second(update, std::cref(tenant_b));
+    std::thread first(update, account_a);
+    std::thread second(update, account_b);
     first.join();
     second.join();
 
     EXPECT_EQ(failures.load(), 0);
-    EXPECT_EQ(Snapshot(table, tenant_a.value()).reserved_bytes, 0);
-    EXPECT_EQ(Snapshot(table, tenant_b.value()).reserved_bytes, 0);
+    EXPECT_EQ(Snapshot(table, tenant_a.value()).charged_bytes, 0);
+    EXPECT_EQ(Snapshot(table, tenant_b.value()).charged_bytes, 0);
 }
 
 TEST(ShardedTenantQuotaTableTest,
-     CrossShardPolicyAndRebuildValidationIsAllOrNothing) {
+     CrossShardMutationsValidateEverythingBeforeUpdating) {
     using TestTable = ShardedTenantQuotaTable<2>;
     const TenantId tenant_a("tenant-a");
     TenantId tenant_b("tenant-b");
@@ -494,70 +478,54 @@ TEST(ShardedTenantQuotaTableTest,
 
     TestTable table;
     ASSERT_TRUE(
-        table.ApplyTenantPolicies({{tenant_a, 100}, {tenant_b, 200}}, 300)
-            .has_value());
-
-    auto policy_result =
-        table.ApplyTenantPolicies({{tenant_a, 300}, {tenant_b, 0}}, 300);
-
-    ASSERT_FALSE(policy_result.has_value());
-    EXPECT_EQ(policy_result.error(), TenantQuotaError::kInvalidArgument);
+        table.ApplyTenantPolicies({{tenant_a, 100}, {tenant_b, 200}}, 300));
+    auto invalid_policy = table.ApplyTenantPolicies(
+        {{tenant_a, 300}, {tenant_b, TenantQuotaAccount::kMaxChargedBytes + 1}},
+        500);
+    ASSERT_FALSE(invalid_policy);
     EXPECT_EQ(Snapshot(table, tenant_a.value()).requested_quota_bytes, 100);
     EXPECT_EQ(Snapshot(table, tenant_b.value()).requested_quota_bytes, 200);
 
-    ASSERT_TRUE(table
-                    .RebuildUsage({{tenant_a,
-                                    {.used_bytes = 10,
-                                     .committed_count = 1,
-                                     .metadata_object_count = 1}},
-                                   {tenant_b,
-                                    {.used_bytes = 20,
-                                     .committed_count = 1,
-                                     .metadata_object_count = 1}}},
-                                  300)
-                    .has_value());
-
-    auto rebuild_result = table.RebuildUsage(
-        {{tenant_a,
-          {.used_bytes = 30, .committed_count = 1, .metadata_object_count = 1}},
+    ASSERT_TRUE(table.RebuildUsage(
+        {{tenant_a, {.charged_bytes = 40}}, {tenant_b, {.charged_bytes = 50}}},
+        300));
+    auto invalid_usage = table.RebuildUsage(
+        {{tenant_a, {.charged_bytes = 60}},
          {tenant_b,
-          {.used_bytes = 40,
-           .committed_count = 0,
-           .metadata_object_count = 1}}},
+          {.charged_bytes = TenantQuotaAccount::kMaxChargedBytes + 1}}},
         300);
-
-    ASSERT_FALSE(rebuild_result.has_value());
-    EXPECT_EQ(rebuild_result.error(), TenantQuotaError::kInvalidArgument);
-    EXPECT_EQ(Snapshot(table, tenant_a.value()).used_bytes, 10);
-    EXPECT_EQ(Snapshot(table, tenant_b.value()).used_bytes, 20);
+    ASSERT_FALSE(invalid_usage);
+    EXPECT_EQ(Snapshot(table, tenant_a.value()).charged_bytes, 40);
+    EXPECT_EQ(Snapshot(table, tenant_b.value()).charged_bytes, 50);
 }
 
 TEST(ShardedTenantQuotaTableTest,
-     DisabledPolicyRejectsRegularAndZeroByteReservations) {
+     DisabledPolicyRejectsRegularAndZeroByteCharges) {
     ShardedTenantQuotaTable<8> table;
     const TenantId tenant_id("tenant-a");
-    ASSERT_TRUE(table.ApplyTenantPolicies({{tenant_id, 100}}, 100).has_value());
+    table.ApplyTenantPolicies({{tenant_id, 100}}, 100);
+    auto* account = table.GetOrCreateTenantHandle(tenant_id);
     ASSERT_TRUE(table.DisableTenantPolicyIfEmpty(tenant_id).has_value());
 
-    auto regular = table.Reserve(tenant_id, 1);
-    auto zero = table.Reserve(tenant_id, 0);
+    auto regular = account->TryCharge(1);
+    auto zero = account->TryCharge(0);
 
     ASSERT_FALSE(regular.has_value());
     ASSERT_FALSE(zero.has_value());
-    EXPECT_EQ(regular.error(), TenantQuotaError::kTenantNotRegistered);
-    EXPECT_EQ(zero.error(), TenantQuotaError::kTenantNotRegistered);
+    EXPECT_EQ(regular.error().error, TenantQuotaError::kTenantNotRegistered);
+    EXPECT_EQ(zero.error().error, TenantQuotaError::kTenantNotRegistered);
 }
 
 TEST(ShardedTenantQuotaTableTest, RecomputeCanRunWithAccounting) {
     ShardedTenantQuotaTable<8> table;
     const TenantId tenant_id("tenant-a");
-    ASSERT_TRUE(
-        table.ApplyTenantPolicies({{tenant_id, 1000}}, 1000).has_value());
+    table.ApplyTenantPolicies({{tenant_id, 1000}}, 1000);
+    auto* account = table.GetOrCreateTenantHandle(tenant_id);
 
     std::atomic<int> failures = 0;
     std::thread accounting([&] {
         for (int i = 0; i < 1000; ++i) {
-            if (!table.Reserve(tenant_id, 1) || !table.Abort(tenant_id, 1)) {
+            if (!account->TryCharge(1) || !account->Release(1)) {
                 ++failures;
             }
         }
@@ -573,7 +541,7 @@ TEST(ShardedTenantQuotaTableTest, RecomputeCanRunWithAccounting) {
 
     EXPECT_EQ(failures.load(), 0);
     auto snapshot = Snapshot(table, "tenant-a");
-    EXPECT_EQ(snapshot.reserved_bytes, 0);
+    EXPECT_EQ(snapshot.charged_bytes, 0);
     EXPECT_EQ(snapshot.effective_quota_bytes, 1000);
 }
 
@@ -613,6 +581,8 @@ TEST(TenantQuotaPolicyStoreTest, RejectsInvalidYamlPolicies) {
         "version: 1\n\ntenants:\n  - name: \"tenant\\x7f\"\n    quota: 1KB\n",
         "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: 1KB\n  - name: "
         "tenant-a\n    quota: 2KB\n",
+        "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: "
+        "9223372036854775808\n",
         "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: "
         "18446744073709551616\n",
         "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: "
